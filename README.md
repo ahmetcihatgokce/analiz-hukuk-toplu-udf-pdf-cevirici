@@ -1,18 +1,26 @@
 # Analiz Hukuk Toplu UDF PDF Çevirici
 
-Windows için ücretsiz bir masaüstü programı. UDF ve PDF dosyaları bilgisayarınızda işlenir.
+Windows için ücretsiz masaüstü programı. Belgeler bilgisayarınızda işlenir.
 
-[Windows için 1.02 sürümünü indir (ZIP)](https://github.com/ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici/releases/download/v1.02/Analiz-Hukuk-Toplu-UDF-PDF-Cevirici-1.02.zip)
+[Windows için 1.03 sürümünü indir (ZIP)](https://github.com/ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici/releases/download/v1.03/Analiz-Hukuk-Toplu-UDF-PDF-Cevirici-1.03.zip)
 
 ## Kullanım
 
 1. ZIP dosyasını çıkarın ve `Analiz-Hukuk-Toplu-UDF-PDF-Cevirici.exe` dosyasını çalıştırın.
-2. **UDF’den PDF’ye** dönüştürmek için kaynak klasörü seçin. PDF’ler aynı adla `PDF-UYAP` klasörüne kaydedilir.
-3. **PDF birleştir** ile birden fazla PDF seçip sıralayabilirsiniz. **PDF ayır** ile her sayfayı ayrı PDF’ye kaydedebilir veya `1,3-5` gibi bir seçimle belirli sayfaları tek PDF’ye çıkarabilirsiniz.
+2. **Klasör seç**, **UDF seç** veya **Dosya seç** düğmesiyle girdileri belirleyin. Dosya seçiciler tekli ve çoklu seçimi destekler.
+3. **İşlemi başlat** düğmesine basın. Varsayılan çıktı `PDF-UYAP` klasörüdür. Çıktı konumunu değiştirebilirsiniz. Var olan PDF’lerin üzerine yazılmaz.
 
-Windows, UYAP Doküman Editörü ve Java 8 gerekir. Program hesap, belge yüklemesi veya kullanım kaydı gerektirmez. Elektronik imzalı belgelerin özgün dosyalarını saklayın.
+| İşlem | Destek ve gereksinimler |
+| --- | --- |
+| UDF → PDF | UYAP Doküman Editörü ve Java 8 |
+| Görsel → PDF | TIF/TIFF, JPG/JPEG, PNG, BMP ve GIF. TIFF’in tüm sayfaları, GIF’in ilk karesi aktarılır. |
+| Vekâlet pulu makbuzu → PDF | HTML/HTM. Kurulu Edge veya Chrome ile yerel sayfa içeriği kullanılır. Haricî kaynaklar ve betikler yüklenmez. |
+| Arşivden PDF ayıkla veya dönüştür | ZIP, RAR ve ZIP tabanlı şifresiz EYP. Arşiv içindeki hedef alt klasörler korunur. RAR için Windows’un `tar.exe` bileşeni gerekir. |
+| PDF birleştir / ayır | UYAP Doküman Editörü ve Java 8. Seçili sayfa aralıkları ayrı PDF olarak kaydedilebilir. |
 
-**ZIP SHA-256** `847e23d395fc75387204e7693b57ec7d3d346be1cc54acc51878d5bc55228a51`
+Hazır PDF dosyaları değiştirilmeden ayıklanır. İmzalı UDF ve EYP asıllarını saklayın. Dönüşüm e-imzayı doğrulamaz veya dönüştürülen PDF’ye taşımaz. Şifreli paketler, XML ve Office biçimleri kapsam dışındadır.
+
+**ZIP SHA-256** `5a93065e2a356810e07e66231de4c7e09d393762acf542038b904795e32afc7a`
 
 - [Windows programı gizlilik açıklaması](https://analizhukukburosu.org/uygulamalar/toplu-udf-pdf/gizlilik)
 - [Analiz Hukuk uygulamaları](https://analizhukukburosu.org/uygulamalar)
