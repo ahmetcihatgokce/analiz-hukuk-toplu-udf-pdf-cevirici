@@ -2,7 +2,7 @@
 
 **UYAP evraklarını müvekkilinizle paylaşmaya hazırlayın.** Avukatlar ve çok sayıda dosya yöneten hukuk büroları, bir klasördeki UDF evraklarını dosya adlarını koruyarak topluca PDF’ye dönüştürebilir ve paylaşacakları belgeleri tek PDF’de birleştirebilir.
 
-Windows için ücretsiz masaüstü programı. Belgeler bilgisayarınızda işlenir ve internete yüklenmez.
+Ücretsiz Windows uygulamasının sade arayüzü dosya seçme, dönüştürme ve PDF’leri birleştirme adımlarına odaklanır. Belgeler bilgisayarınızda işlenir ve internete yüklenmez.
 
 [Windows için 1.03 sürümünü indir (ZIP)](https://github.com/ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici/releases/download/v1.03/Analiz-Hukuk-Toplu-UDF-PDF-Cevirici-1.03.zip)
 
