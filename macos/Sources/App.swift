@@ -164,7 +164,9 @@ private final class ConverterWindowController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     private func buildContents() {
-        guard let content = window?.contentView else { return }
+        guard let window = window else { return }
+        let content = WindowBackgroundView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = content
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
@@ -249,11 +251,29 @@ private final class ConverterWindowController: NSWindowController {
         }
         content.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
+        func textFields(in view: NSView) -> [NSTextField] {
+            let own = (view as? NSTextField).map { [$0] } ?? []
+            return own + view.subviews.flatMap { textFields(in: $0) }
+        }
+        let fields = textFields(in: content)
+        for text in ["Toplu UDF PDF Çevirici", "PDF’lerin kaydedileceği klasör"] {
+            guard fields.contains(where: {
+                $0.stringValue == text && !$0.isHidden && $0.alphaValue > 0 && $0.bounds.width > 0 && $0.bounds.height > 0
+            }) else {
+                throw ValidationError("Ana pencere başlığı veya açıklama etiketi görünür değil: \(text)")
+            }
+        }
         guard content.bounds.width >= 600, content.bounds.height >= 500,
               let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
             throw ValidationError("Ana pencerenin görüntüsü oluşturulamadı.")
         }
         content.cacheDisplay(in: content.bounds, to: bitmap)
+        let cornerPixels = [(1, 1), (bitmap.pixelsWide - 2, 1), (1, bitmap.pixelsHigh - 2)]
+        guard cornerPixels.allSatisfy({
+            (bitmap.colorAt(x: $0.0, y: $0.1)?.alphaComponent ?? 0) >= 0.99
+        }) else {
+            throw ValidationError("Ana pencere görüntüsünde saydam arka plan oluştu.")
+        }
         guard let data = bitmap.representation(using: .png, properties: [:]) else {
             throw ValidationError("Ana pencerenin PNG çıktısı oluşturulamadı.")
         }
@@ -412,7 +432,9 @@ private final class MergeWindowController: NSWindowController, NSTableViewDataSo
     required init?(coder: NSCoder) { nil }
 
     private func buildContents() {
-        guard let content = window?.contentView else { return }
+        guard let window = window else { return }
+        let content = WindowBackgroundView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = content
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
@@ -528,7 +550,9 @@ private final class SplitWindowController: NSWindowController {
     required init?(coder: NSCoder) { nil }
 
     private func buildContents() {
-        guard let content = window?.contentView else { return }
+        guard let window = window else { return }
+        let content = WindowBackgroundView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = content
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
@@ -638,6 +662,21 @@ private final class SplitWindowController: NSWindowController {
         }
         guard !result.isEmpty else { throw ValidationError("En az bir sayfa seçin." ) }
         return result
+    }
+}
+
+@MainActor
+private final class WindowBackgroundView: NSView {
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 
