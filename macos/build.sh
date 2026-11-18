@@ -7,7 +7,11 @@ output="$(cd "$output" && pwd)"
 app="$output/Toplu UDF PDF Cevirici.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/JavaBridge"
 cp "$root/Info.plist" "$app/Contents/Info.plist"
-clang -O2 -mmacosx-version-min=13.0 -c "$root/Sources/ArchiveReader.c" -o "$output/ArchiveReader.o"
+archive_prefix="$(brew --prefix libarchive)"
+if [ ! -f "$archive_prefix/include/archive.h" ]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 brew install libarchive
+fi
+clang -O2 -mmacosx-version-min=13.0 -I "$archive_prefix/include" -c "$root/Sources/ArchiveReader.c" -o "$output/ArchiveReader.o"
 swiftc -O -parse-as-library -swift-version 5 -target "$(uname -m)-apple-macos13.0" \
     -framework AppKit -framework PDFKit -framework WebKit -framework ImageIO \
     -framework UniformTypeIdentifiers -import-objc-header "$root/Sources/ArchiveReader.h" \
