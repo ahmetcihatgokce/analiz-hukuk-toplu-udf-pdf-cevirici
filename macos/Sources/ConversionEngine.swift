@@ -279,7 +279,7 @@ final class ConversionEngine {
             let name = suffix == 0 ? "\(stem).pdf" : "\(stem) (\(suffix + 1)).pdf"
             let destination = folder.appendingPathComponent(name)
             do {
-                try files.linkItem(at: staged, to: destination)
+                try files.copyItem(at: staged, to: destination)
                 return destination
             } catch {
                 if files.fileExists(atPath: destination.path) { continue }
@@ -300,7 +300,7 @@ final class ConversionEngine {
         try data.write(to: staged, options: .atomic)
         try NativePDF.validate(staged)
         do {
-            try files.linkItem(at: staged, to: output)
+            try files.copyItem(at: staged, to: output)
         } catch {
             if files.fileExists(atPath: output.path) {
                 throw ConversionFailure("Bu adda dosya zaten var. Farklı bir çıktı adı seçin.")
