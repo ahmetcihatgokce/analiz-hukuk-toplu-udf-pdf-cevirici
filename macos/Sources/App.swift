@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import PDFKit
+import UniformTypeIdentifiers
 
 @main
 struct ConverterApp {
@@ -280,7 +281,8 @@ private final class ConverterWindowController: NSWindowController {
         panel.title = udfOnly ? "UDF belgelerini seçin" : "Dönüştürülecek belgeleri seçin"
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.allowedFileTypes = udfOnly ? ["udf"] : ConversionEngine.supportedExtensions.sorted()
+        let extensions = udfOnly ? ["udf"] : ConversionEngine.supportedExtensions.sorted()
+        panel.allowedContentTypes = extensions.compactMap { UTType(filenameExtension: $0, conformingTo: .data) }
         if panel.runModal() == .OK, let first = panel.urls.first {
             setSelection(panel.urls, defaultBase: first.deletingLastPathComponent())
         }
@@ -441,8 +443,8 @@ private final class MergeWindowController: NSWindowController, NSTableViewDataSo
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
         let add = NSButton(title: "PDF dosyaları ekle…", target: self, action: #selector(addFiles))
         let remove = NSButton(title: "Kaldır", target: self, action: #selector(removeFile))
-        let up = NSButton(title: "Yukarı", target: self, action: #selector(moveUp))
-        let down = NSButton(title: "Aşağı", target: self, action: #selector(moveDown))
+        let up = NSButton(title: "Yukarı", target: self, action: #selector(moveSelectedPDFUp))
+        let down = NSButton(title: "Aşağı", target: self, action: #selector(moveSelectedPDFDown))
         column.addArrangedSubview(buttonRow([add, remove, up, down]))
         mergeButton.isEnabled = false
         column.addArrangedSubview(mergeButton)
@@ -460,7 +462,7 @@ private final class MergeWindowController: NSWindowController, NSTableViewDataSo
     @objc private func addFiles() {
         let panel = NSOpenPanel()
         panel.title = "Birleştirilecek PDF dosyalarını seçin"
-        panel.allowedFileTypes = ["pdf"]
+        panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK {
             for file in panel.urls where !files.contains(file) { files.append(file) }
@@ -479,8 +481,8 @@ private final class MergeWindowController: NSWindowController, NSTableViewDataSo
         mergeButton.isEnabled = files.count >= 2
     }
 
-    @objc private func moveUp() { moveSelection(by: -1) }
-    @objc private func moveDown() { moveSelection(by: 1) }
+    @objc private func moveSelectedPDFUp() { moveSelection(by: -1) }
+    @objc private func moveSelectedPDFDown() { moveSelection(by: 1) }
 
     private func moveSelection(by offset: Int) {
         let row = table.selectedRow
@@ -556,7 +558,7 @@ private final class SplitWindowController: NSWindowController {
 
     @objc private func choosePDF() {
         let panel = NSOpenPanel()
-        panel.allowedFileTypes = ["pdf"]
+        panel.allowedContentTypes = [.pdf]
         if panel.runModal() == .OK, let file = panel.url {
             guard let document = PDFDocument(url: file), !document.isLocked, document.pageCount > 0 else {
                 showError(ValidationError("PDF açılamadı veya parola ile kilitli."))
@@ -659,7 +661,7 @@ private func pdfSaveDestination(title: String, name: String) -> URL? {
     let panel = NSSavePanel()
     panel.title = title
     panel.nameFieldStringValue = name
-    panel.allowedFileTypes = ["pdf"]
+    panel.allowedContentTypes = [.pdf]
     panel.canCreateDirectories = true
     guard panel.runModal() == .OK, let result = panel.url else { return nil }
     return result
