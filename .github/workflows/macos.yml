@@ -1,0 +1,40 @@
+name: macOS build and conversion tests
+
+on:
+  push:
+    branches: [macos-port]
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  uyap-compatibility:
+    name: UYAP ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Test official UYAP Mac renderer
+        run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/uyap-report"
+      - name: Upload synthetic conversion evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uyap-macos-${{ matrix.runner }}
+          path: ${{ runner.temp }}/uyap-report
+          if-no-files-found: warn
+          retention-days: 14
