@@ -27,7 +27,14 @@ public final class UyapBridge {
             }
             File input = new File(arguments[0]);
             File output = new File(arguments[1]);
-            validateUdf(input);
+            try {
+                validateUdf(input);
+            } catch (Exception validationError) {
+                throw new IllegalArgumentException("UDF validation failed: "
+                    + validationError.getClass().getSimpleName() + ": "
+                    + validationError.getMessage(), validationError);
+            }
+            System.out.println("UDF_VALIDATION_OK");
             Class<?> trayClass = Class.forName(
                 "tr.com.havelsan.uyap.system.editor.utils.tray.TrayUtils");
             Object tray = trayClass.getMethod("getInstance").invoke(null);
@@ -90,7 +97,10 @@ public final class UyapBridge {
             if (content == null) {
                 throw new IllegalArgumentException("UDF archive does not contain content.xml");
             }
-            SAXParserFactory factory = SAXParserFactory.newInstance();
+            // UYAP includes its own older XML provider. Validate with the JDK's
+            // parser so the required external-resource controls stay effective.
+            SAXParserFactory factory = SAXParserFactory.newInstance(
+                "com.sun.org.apache.xerces.internal.jaxp.SAXParserFactoryImpl", null);
             factory.setNamespaceAware(true);
             factory.setXIncludeAware(false);
             factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);

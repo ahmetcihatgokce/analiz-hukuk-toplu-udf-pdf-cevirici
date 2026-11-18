@@ -181,12 +181,7 @@ final class ConversionEngine {
 
     private func convertUDF(input: URL, output: URL) async throws {
         let runtime = try UYAPRuntime.discover()
-        let helperDirectory = Bundle.main.resourceURL?.appendingPathComponent("JavaBridge", isDirectory: true)
-        let configuredHelper = ProcessInfo.processInfo.environment["UYAP_BRIDGE_DIRECTORY"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-        guard let helper = configuredHelper ?? helperDirectory,
-              files.fileExists(atPath: helper.appendingPathComponent("UyapBridge.class").path) else {
-            throw ConversionFailure("UDF dönüşüm yardımcısı uygulama paketinde bulunamadı.")
-        }
+        let helper = try javaHelperDirectory()
         let temporary = try makeTemporaryDirectory()
         defer { try? files.removeItem(at: temporary) }
         let classpath = ([helper.path] + runtime.jars.map(\.path)).joined(separator: ":")
@@ -198,6 +193,27 @@ final class ConversionEngine {
         try await Task.detached(priority: .userInitiated) {
             try ProcessRunner.run(executable: runtime.java, arguments: arguments, directory: temporary, timeout: 90)
         }.value
+    }
+
+    private func javaHelperDirectory() throws -> URL {
+        var candidates: [URL] = []
+        if let configured = ProcessInfo.processInfo.environment["UYAP_BRIDGE_DIRECTORY"], !configured.isEmpty {
+            candidates.append(URL(fileURLWithPath: configured, isDirectory: true))
+        }
+        if let resources = Bundle.main.resourceURL {
+            candidates.append(resources.appendingPathComponent("JavaBridge", isDirectory: true))
+        }
+        // Direct command-line launches can report a different main bundle than LaunchServices.
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()
+        let contents = executable.deletingLastPathComponent().deletingLastPathComponent()
+        candidates.append(contents.appendingPathComponent("Resources/JavaBridge", isDirectory: true))
+        for directory in candidates {
+            if files.fileExists(atPath: directory.appendingPathComponent("UyapBridge.class").path) {
+                return directory
+            }
+        }
+        let checked = candidates.map(\.path).joined(separator: ", ")
+        throw ConversionFailure("UDF dönüşüm yardımcısı bulunamadı. Kontrol edilen konumlar: \(checked)")
     }
 
     private func selectedFiles(_ selected: [URL], excluding output: URL) throws -> [URL] {
@@ -402,6 +418,7 @@ private struct UYAPRuntime {
     static func discover() throws -> UYAPRuntime {
         let files = FileManager.default
         var applications: [URL] = []
+        var inspected: [String] = []
         if let configured = ProcessInfo.processInfo.environment["UYAP_EDITOR_APP"], !configured.isEmpty {
             applications.append(URL(fileURLWithPath: configured, isDirectory: true))
         } else {
@@ -411,7 +428,10 @@ private struct UYAPRuntime {
             }
         }
         for application in applications {
-            guard let enumerator = files.enumerator(at: application, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else { continue }
+            guard let enumerator = files.enumerator(at: application, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) else {
+                inspected.append("\(application.path): okunamadı")
+                continue
+            }
             var jars: [URL] = []
             var runtimes: [URL] = []
             for case let entry as URL in enumerator {
@@ -423,8 +443,10 @@ private struct UYAPRuntime {
             if jars.contains(where: { $0.lastPathComponent == "editor_lib.jar" }), let java = runtimes.sorted(by: { $0.path < $1.path }).first {
                 return UYAPRuntime(java: java, jars: jars.sorted { $0.path < $1.path })
             }
+            inspected.append("\(application.path): \(jars.count) JAR, \(runtimes.count) Java çalıştırıcısı")
         }
-        throw ConversionFailure("Mac için UYAP Doküman Editörü bulunamadı. İşlemcinize uygun güncel sürümü UYAP’ın resmî sitesinden kurun.")
+        let details = inspected.isEmpty ? "Uygulamalar klasöründe UYAP uygulaması yok." : inspected.joined(separator: "; ")
+        throw ConversionFailure("Mac için UYAP Doküman Editörü bulunamadı. İşlemcinize uygun güncel sürümü UYAP’ın resmî sitesinden kurun. \(details)")
     }
 }
 
@@ -441,7 +463,11 @@ private enum ProcessRunner {
         process.currentDirectoryURL = directory
         process.standardOutput = logFile
         process.standardError = logFile
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            throw ConversionFailure("UYAP Java çalıştırıcısı başlatılamadı: \(executable.path). \(error.localizedDescription)")
+        }
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
@@ -457,7 +483,7 @@ private enum ProcessRunner {
         guard process.terminationStatus == 0 else {
             let errorData = try? Data(contentsOf: log)
             let text = errorData.flatMap { String(data: $0.prefix(2048), encoding: .utf8) } ?? ""
-            throw ConversionFailure("UYAP dönüşümü tamamlanamadı. \(text)")
+            throw ConversionFailure("UYAP dönüşümü tamamlanamadı (çıkış kodu \(process.terminationStatus)). \(text)")
         }
     }
 
@@ -482,7 +508,9 @@ private final class LocalHTMLRenderer: NSObject, WKNavigationDelegate {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         let rules = """
         [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},
-         {"trigger":{"url-filter":"^(file|data|about):"},"action":{"type":"ignore-previous-rules"}}]
+         {"trigger":{"url-filter":"^file:"},"action":{"type":"ignore-previous-rules"}},
+         {"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}},
+         {"trigger":{"url-filter":"^about:"},"action":{"type":"ignore-previous-rules"}}]
         """
         let compiled: WKContentRuleList = try await withCheckedThrowingContinuation { result in
             WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "LocalDocumentsOnly", encodedContentRuleList: rules) { list, error in

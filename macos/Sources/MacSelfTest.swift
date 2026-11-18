@@ -4,6 +4,7 @@ import ImageIO
 import PDFKit
 import UniformTypeIdentifiers
 import CoreFoundation
+import CoreText
 
 @MainActor
 enum MacSelfTest {
@@ -53,11 +54,13 @@ enum MacSelfTest {
 
             await check("ordered PDF merge and extraction") {
                 guard let imagePDF = imagePDF else { throw ConversionFailure("PNG PDF missing") }
+                let fixtureText = PDFDocument(url: original)?.page(at: 0)?.string ?? "<no text>"
+                try require(fixtureText.contains("PAGE_ALPHA"), "Original PDF fixture lost text: \(fixtureText.debugDescription)")
                 let merged = root.appendingPathComponent("merged.pdf")
                 try engine.mergePDFs(inputs: [original, imagePDF], output: merged)
                 let document = PDFDocument(url: merged)
                 try require(document?.pageCount == 4, "Merged page count changed")
-                try require(document?.page(at: 0)?.string?.contains("PAGE_ALPHA") == true, "Merge input order changed")
+                try require(document?.page(at: 0)?.string?.contains("PAGE_ALPHA") == true, "Merge input order changed: \((document?.page(at: 0)?.string ?? "<no text>").debugDescription)")
                 let extracted = root.appendingPathComponent("reordered.pdf")
                 try engine.extractPDF(input: original, pages: [3, 1, 2], output: extracted)
                 let reordered = PDFDocument(url: extracted)
@@ -94,7 +97,8 @@ enum MacSelfTest {
                 let invalid = inputs.appendingPathComponent("05 bozuk.udf")
                 try Data("invalid zip".utf8).write(to: invalid)
                 let results = await engine.convert(inputs: [good, invalid], outputDirectory: root.appendingPathComponent("udf"), archivesCopyPDFOnly: false) { _, _, _ in }
-                try require(results.filter { $0.error == nil }.count == 1, "Expected one UDF success")
+                let details = results.map { "\($0.input.lastPathComponent): \($0.error ?? "OK")" }.joined(separator: "; ")
+                try require(results.filter { $0.error == nil }.count == 1, "Expected one UDF success: \(details)")
                 try require(results.filter { $0.error != nil }.count == 1, "Malformed UDF should fail independently")
                 let goodPDF = results.first(where: { $0.input == good })?.output
                 let text = goodPDF.flatMap { PDFDocument(url: $0)?.string } ?? ""
@@ -159,10 +163,14 @@ enum MacSelfTest {
         guard let context = CGContext(consumer: consumer, mediaBox: &page, nil) else { throw ConversionFailure("PDF context failed") }
         for label in labels {
             context.beginPDFPage(nil)
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
-            (label as NSString).draw(at: NSPoint(x: 42, y: 760), withAttributes: [.font: NSFont.systemFont(ofSize: 18), .foregroundColor: NSColor.black])
-            NSGraphicsContext.restoreGraphicsState()
+            let attributes: [NSAttributedString.Key: Any] = [
+                NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 18, nil),
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1)
+            ]
+            let line = CTLineCreateWithAttributedString(NSAttributedString(string: label, attributes: attributes))
+            context.textMatrix = .identity
+            context.textPosition = CGPoint(x: 42, y: 760)
+            CTLineDraw(line, context)
             context.endPDFPage()
         }
         context.closePDF()

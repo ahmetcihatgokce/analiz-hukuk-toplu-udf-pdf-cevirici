@@ -369,17 +369,27 @@ int ah_extract_archive(const char *source,
         if (entry_name == NULL) {
             entry_name = archive_entry_pathname(entry);
         }
-        if (archive_entry_filetype(entry) == AE_IFDIR && entry_name != NULL &&
-            (strcmp(entry_name, ".") == 0 || strcmp(entry_name, "./") == 0)) {
-            if (consume_entry(reader, -1, &total_bytes, &started, error, error_size) != 0) {
+        int is_directory = archive_entry_filetype(entry) == AE_IFDIR;
+        int is_root_directory = is_directory && entry_name != NULL &&
+            (strcmp(entry_name, ".") == 0 || strcmp(entry_name, "./") == 0);
+        char relative[AH_MAX_PATH_BYTES];
+        if (!is_root_directory && !copy_safe_relative_name(entry_name, relative, sizeof(relative))) {
+            set_error(error, error_size, "The archive contains an unsafe or invalid file path.");
+            goto cleanup;
+        }
+        if (is_directory) {
+            /* RAR readers reject archive_read_data for directory headers. A
+             * directory carries no expanded payload and creates no output here.
+             */
+            if (declared_size > 0) {
+                set_error(error, error_size, "An archive directory unexpectedly declares file data.");
+                goto cleanup;
+            }
+            if (archive_read_data_skip(reader) < ARCHIVE_WARN) {
+                set_archive_error(error, error_size, reader);
                 goto cleanup;
             }
             continue;
-        }
-        char relative[AH_MAX_PATH_BYTES];
-        if (!copy_safe_relative_name(entry_name, relative, sizeof(relative))) {
-            set_error(error, error_size, "The archive contains an unsafe or invalid file path.");
-            goto cleanup;
         }
         if (archive_entry_filetype(entry) != AE_IFREG || archive_entry_hardlink(entry) != NULL ||
             archive_entry_symlink(entry) != NULL || !wanted_extension(relative, extensions)) {
