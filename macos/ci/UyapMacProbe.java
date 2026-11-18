@@ -48,6 +48,7 @@ public final class UyapMacProbe {
         if (bytes.length < 100 || !new String(bytes, 0, 5, StandardCharsets.US_ASCII).equals("%PDF-")) {
             throw new IllegalStateException("Exporter did not create a PDF");
         }
+        System.out.println("UYAP_MAC_EXPORT_CREATED bytes=" + bytes.length);
         verifyPdf(output, report);
         System.out.println("UYAP_MAC_EXPORT_OK bytes=" + bytes.length);
         System.exit(0);

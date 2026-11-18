@@ -7,16 +7,46 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 report_dir="${1:-$script_dir/report}"
 mkdir -p "$report_dir"
 report_dir="$(cd "$report_dir" && pwd)"
-probe_root="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/uyap-mac-probe.XXXXXX")"
+scratch_base="$(cd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" && pwd)"
+probe_root="$(mktemp -d "$scratch_base/uyap-mac-probe.XXXXXX")"
 mount_point="$probe_root/mounted"
 mounted=0
 cleanup() {
+    if [ "${UYAP_PROBE_KEEP_RUNTIME:-0}" = 1 ]; then
+        return
+    fi
     if [ "$mounted" = 1 ]; then
         hdiutil detach "$mount_point" -quiet || true
     fi
-    rm -rf -- "$probe_root"
+    case "$probe_root" in
+        "$scratch_base"/uyap-mac-probe.*) rm -rf -- "$probe_root" ;;
+        *) echo 'Refusing cleanup outside the generated probe directory' >&2 ;;
+    esac
 }
 trap cleanup EXIT
+
+find_editor_jar() {
+    python3 - "$1" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+root = pathlib.Path(sys.argv[1])
+known = next(root.rglob('editor_lib.jar'), None)
+if known is not None:
+    print(known)
+else:
+    target = 'tr/com/havelsan/uyap/system/editor/utils/tray/TrayUtils.class'
+    for candidate in root.rglob('*.jar'):
+        try:
+            with zipfile.ZipFile(candidate) as archive:
+                if target in archive.namelist():
+                    print(candidate)
+                    break
+        except (OSError, zipfile.BadZipFile):
+            continue
+PY
+}
 
 case "$(uname -m)" in
     arm64) download_url='https://rayp.adalet.gov.tr/resimler/2/dosya/UyapDokumanEditoru-AppleSilicon-5.4.21.zip' ;;
@@ -33,7 +63,7 @@ search_root="$probe_root/extracted"
 
 # Current downloads contain the app. Handle a disk image or flat package if
 # the vendor changes the ZIP's inner packaging while keeping its URL.
-editor_jar="$(find "$search_root" -type f -name editor_lib.jar -print -quit)"
+editor_jar="$(find_editor_jar "$search_root")"
 if [ -z "$editor_jar" ]; then
     disk_image="$(find "$search_root" -type f -name '*.dmg' -print -quit)"
     if [ -n "$disk_image" ]; then
@@ -41,7 +71,7 @@ if [ -z "$editor_jar" ]; then
         hdiutil attach "$disk_image" -nobrowse -readonly -mountpoint "$mount_point" -quiet
         mounted=1
         search_root="$mount_point"
-        editor_jar="$(find "$search_root" -type f -name editor_lib.jar -print -quit)"
+        editor_jar="$(find_editor_jar "$search_root")"
     fi
 fi
 if [ -z "$editor_jar" ]; then
@@ -49,7 +79,7 @@ if [ -z "$editor_jar" ]; then
     if [ -n "$package" ]; then
         pkgutil --expand-full "$package" "$probe_root/expanded-package"
         search_root="$probe_root/expanded-package"
-        editor_jar="$(find "$search_root" -type f -name editor_lib.jar -print -quit)"
+        editor_jar="$(find_editor_jar "$search_root")"
     fi
 fi
 if [ -z "$editor_jar" ]; then
@@ -118,12 +148,40 @@ with zipfile.ZipFile(probe_root / 'sentetik-örnek.udf', 'w', zipfile.ZIP_DEFLAT
     fixture.writestr('content.xml', ET.tostring(template, encoding='utf-8', xml_declaration=True))
 PY
 classpath="$(cat "$probe_root/classpath.txt")"
+cp "$probe_root/sentetik-örnek.udf" "$report_dir/sentetik-ornek.udf"
+if [ "${UYAP_PROBE_KEEP_RUNTIME:-0}" = 1 ]; then
+    printf 'export UYAP_EDITOR_APP=%q\nexport UYAP_TEST_JAVA=%q\nexport UYAP_TEST_CLASSPATH=%q\n' \
+        "$app_root" "$java_path" "$classpath" > "$probe_root/runtime.env"
+    printf 'runtimeEnv=%s\n' "$probe_root/runtime.env" >> "$report_dir/environment.txt"
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        printf 'UYAP_EDITOR_APP=%s\nUYAP_TEST_JAVA=%s\nUYAP_TEST_CLASSPATH=%s\n' \
+            "$app_root" "$java_path" "$classpath" >> "$GITHUB_ENV"
+    fi
+fi
 set +e
-"$java_path" -Xmx1024m -Djava.awt.headless=true -Dsun.java2d.uiScale=1 \
-    "-Duser.home=$probe_root/user-home" -Djavax.xml.accessExternalDTD= \
-    -Djavax.xml.accessExternalSchema= -cp "$classpath" UyapMacProbe \
-    "$probe_root/sentetik-örnek.udf" "$report_dir/sentetik-ornek.pdf" "$report_dir" \
-    > "$report_dir/conversion.log" 2>&1
+python3 - "$java_path" "$probe_root" "$classpath" "$report_dir" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+java, temporary, classpath, report = sys.argv[1:]
+report_path = pathlib.Path(report)
+command = [
+    java, '-Xmx1024m', '-Djava.awt.headless=true', '-Dsun.java2d.uiScale=1',
+    '-Duser.home=' + temporary + '/user-home', '-Djavax.xml.accessExternalDTD=',
+    '-Djavax.xml.accessExternalSchema=', '-cp', classpath, 'UyapMacProbe',
+    temporary + '/sentetik-örnek.udf', str(report_path / 'sentetik-ornek.pdf'), report,
+]
+with (report_path / 'conversion.log').open('w', encoding='utf-8') as log:
+    try:
+        completed = subprocess.run(command, cwd=temporary, stdout=log,
+                                   stderr=subprocess.STDOUT, timeout=180, check=False)
+        status = completed.returncode
+    except subprocess.TimeoutExpired:
+        log.write('\nUYAP_MAC_EXPORT_TIMEOUT after 180 seconds\n')
+        status = 124
+sys.exit(status)
+PY
 conversion_status=$?
 set -e
 cat "$report_dir/conversion.log"

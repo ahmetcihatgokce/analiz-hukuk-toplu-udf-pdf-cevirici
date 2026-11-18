@@ -16,25 +16,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  uyap-compatibility:
-    name: UYAP ${{ matrix.runner }}
+  mac-application:
+    name: Build and test ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         runner: [macos-15, macos-15-intel]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 16
+    timeout-minutes: 24
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Compile native Mac application
+        run: bash macos/build.sh "$RUNNER_TEMP/package"
       - name: Test official UYAP Mac renderer
+        env:
+          UYAP_PROBE_KEEP_RUNTIME: "1"
         run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/uyap-report"
-      - name: Upload synthetic conversion evidence
+      - name: Test conversion and PDF tools
+        env:
+          UYAP_FIXTURE: ${{ runner.temp }}/uyap-report/sentetik-ornek.udf
+          MAC_RAR_FIXTURE: ${{ github.workspace }}/macos/Fixtures/integration.rar
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          app = root / 'package/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf'
+          report = root / 'mac-tests'
+          report.mkdir(exist_ok=True)
+          with (report / 'console.log').open('w') as log:
+              result = subprocess.run([str(app), '--self-test', str(report)], stdout=log,
+                                      stderr=subprocess.STDOUT, timeout=600)
+          print((report / 'console.log').read_text())
+          raise SystemExit(result.returncode)
+          PY
+      - name: Test native window rendering
+        run: |
+          "$RUNNER_TEMP/package/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf" --ui-smoke "$RUNNER_TEMP/mac-tests/application-window.png"
+      - name: Upload test report and synthetic PDFs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: uyap-macos-${{ matrix.runner }}
-          path: ${{ runner.temp }}/uyap-report
+          name: mac-test-report-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/uyap-report
+            ${{ runner.temp }}/mac-tests
           if-no-files-found: warn
           retention-days: 14
+      - name: Upload Mac preview application
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Toplu-UDF-PDF-Mac-1.04-${{ matrix.runner }}
+          path: ${{ runner.temp }}/package/Toplu-UDF-PDF-Mac-1.04-*.zip
+          if-no-files-found: error
+          retention-days: 30
