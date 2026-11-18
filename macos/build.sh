@@ -17,6 +17,11 @@ swiftc -O -parse-as-library -swift-version 5 -target "$(uname -m)-apple-macos13.
     -framework UniformTypeIdentifiers -import-objc-header "$root/Sources/ArchiveReader.h" \
     "$root"/Sources/*.swift "$output/ArchiveReader.o" -larchive \
     -o "$app/Contents/MacOS/UdfPdf"
+otool -L "$app/Contents/MacOS/UdfPdf"
+if otool -L "$app/Contents/MacOS/UdfPdf" | grep -qE '/(opt/homebrew|usr/local)/'; then
+    echo 'Unexpected non-system runtime dependency in Mac app' >&2
+    exit 1
+fi
 javac -encoding UTF-8 -source 8 -target 8 -d "$app/Contents/Resources/JavaBridge" "$root/Resources/UyapBridge.java"
 iconset="$output/AppIcon.iconset"
 mkdir -p "$iconset"
