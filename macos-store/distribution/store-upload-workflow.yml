@@ -162,7 +162,7 @@ jobs:
           lipo "$app/Contents/MacOS/UdfPdf" -verify_arch arm64 x86_64
           codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-upload-entitlements.plist" 2>/dev/null
           python3 - <<'PY'
-          import os, pathlib, plistlib
+          import os, pathlib, plistlib, subprocess
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           if plistlib.loads((root / 'store-upload-entitlements.plist').read_bytes()) != plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes()):
               raise SystemExit('The universal candidate has unexpected sandbox entitlements.')
@@ -170,7 +170,7 @@ jobs:
           for path in [app, *app.rglob('*')]:
               if path.is_symlink():
                   raise SystemExit('Unexpected symlink in the universal candidate.')
-              if 'com.apple.quarantine' in os.listxattr(path, follow_symlinks=False):
+              if 'com.apple.quarantine' in subprocess.check_output(['/usr/bin/xattr', str(path)], text=True).splitlines():
                   raise SystemExit('The Store candidate contains a quarantine attribute.')
           PY
       - name: Sign, validate and upload the reviewed Store build

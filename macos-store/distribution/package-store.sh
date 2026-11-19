@@ -30,7 +30,7 @@ if otool -L "$app/Contents/MacOS/UdfPdf" | grep -qE '/(opt/homebrew|usr/local)/'
 fi
 # Inspect bundle data without executing any bundled code.
 python3 - "$app" "$entitlements_source" <<'PY'
-import os, pathlib, plistlib, sys
+import os, pathlib, plistlib, sys, subprocess
 app = pathlib.Path(sys.argv[1])
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 expected = {
@@ -50,7 +50,7 @@ if entitlements != {'com.apple.security.app-sandbox': True,
 main = app / 'Contents/MacOS/UdfPdf'
 mach_magic = {bytes.fromhex(value) for value in ['feedface', 'cefaedfe', 'feedfacf', 'cffaedfe', 'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca']}
 for path in [app, *app.rglob('*')]:
-    if 'com.apple.quarantine' in os.listxattr(path):
+    if 'com.apple.quarantine' in subprocess.check_output(['/usr/bin/xattr', str(path)], text=True).splitlines():
         raise SystemExit('Remove quarantine metadata from the built app before Store upload.')
     if path.is_symlink():
         raise SystemExit('The reviewed single-executable bundle must not contain symlinks.')

@@ -274,7 +274,7 @@ jobs:
           codesign --verify --deep --strict "$app"
           codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-universal-entitlements.plist" 2>/dev/null
           python3 - <<'PY'
-          import os, pathlib, plistlib
+          import os, pathlib, plistlib, subprocess
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           actual = plistlib.loads((root / 'store-universal-entitlements.plist').read_bytes())
           expected = plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes())
@@ -282,7 +282,7 @@ jobs:
               raise SystemExit('Universal app has unexpected sandbox entitlements.')
           app = root / 'store-universal/Toplu UDF PDF Cevirici.app'
           for path in [app, *app.rglob('*')]:
-              if 'com.apple.quarantine' in os.listxattr(path, follow_symlinks=False):
+              if 'com.apple.quarantine' in subprocess.check_output(['/usr/bin/xattr', str(path)], text=True).splitlines():
                   raise SystemExit('Remove the quarantine attribute from the built app before Store upload.')
           PY
           ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/store-universal-output/Store-universal-candidate.zip"
