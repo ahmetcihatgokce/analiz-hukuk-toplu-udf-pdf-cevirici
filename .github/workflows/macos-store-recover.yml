@@ -1,0 +1,280 @@
+name: Recover tested universal Mac Store candidate
+# One-time packaging recovery: no compilation, app execution, signing secrets or upload.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/macos-store-recover.yml'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: mac-store-universal-recovery
+  cancel-in-progress: false
+jobs:
+  universal-candidate:
+    name: Assemble tested universal Store candidate
+    if: github.repository == 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici' && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          persist-credentials: false
+      - name: Verify the immutable tested artifacts and unchanged application inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, urllib.request
+          repository = 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici'
+          source_run_id = 44537236242
+          binary_sha = '2a559519e8b2b03d1fa5ceb32d0ca5e26d2aed58'
+          current_sha = os.environ['GITHUB_SHA']
+          if os.environ['GITHUB_REPOSITORY'] != repository or os.environ['GITHUB_REF'] != 'refs/heads/main':
+              raise SystemExit('This one-time recovery only runs in the reviewed repository main branch.')
+          def read_api(path):
+              request = urllib.request.Request('https://api.github.com/repos/' + repository + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          run = read_api('/actions/runs/' + str(source_run_id))
+          if (run.get('id') != source_run_id or run.get('status') != 'completed' or
+              run.get('conclusion') != 'failure' or run.get('head_sha') != binary_sha or
+              run.get('path') != '.github/workflows/macos-store.yml' or
+              run.get('head_branch') != 'macos-store' or
+              run.get('repository', {}).get('full_name') != repository or
+              run.get('head_repository', {}).get('full_name') != repository):
+              raise SystemExit('The original binary source run differs from the reviewed recovery source.')
+          for job_id, name in [
+              (135622646437, 'Native sandbox macos-15'),
+              (135622709615, 'Native sandbox macos-15-intel'),
+          ]:
+              job = read_api('/actions/jobs/' + str(job_id))
+              if (job.get('id') != job_id or job.get('run_id') != source_run_id or
+                  job.get('name') != name or job.get('status') != 'completed' or
+                  job.get('conclusion') != 'success'):
+                  raise SystemExit('A required original native sandbox job did not pass.')
+          for artifact_id, name, digest in [
+              (14535904526, 'store-candidate-macos-15',
+               'sha256:899a6dc979427be11ac2b102895edcbc8589f26332d76ac16d9afe47b248b2f1'),
+              (14536019142, 'store-candidate-macos-15-intel',
+               'sha256:668295f0f1697935adcdae9ae7d2d73d916c1018745333c15c43ead5db3e6601'),
+          ]:
+              artifact = read_api('/actions/artifacts/' + str(artifact_id))
+              provenance = artifact.get('workflow_run') or {}
+              if (artifact.get('id') != artifact_id or artifact.get('name') != name or
+                  artifact.get('expired') is not False or artifact.get('digest') != digest or
+                  not 0 < artifact.get('size_in_bytes', 0) <= 64 * 1024 * 1024 or
+                  provenance.get('id') != source_run_id or provenance.get('head_sha') != binary_sha):
+                  raise SystemExit('A fixed candidate artifact has invalid provenance, digest, size or expiry.')
+          def source_files(sha):
+              tree = read_api('/git/trees/' + sha + '?recursive=1')
+              if tree.get('truncated') is not False:
+                  raise SystemExit('Cannot verify a truncated application source tree.')
+              inventory = {}
+              for item in tree.get('tree', []):
+                  name = item.get('path', '')
+                  if not name.startswith('macos-store/') or name.startswith('macos-store/distribution/'):
+                      continue
+                  if item.get('type') == 'tree':
+                      continue
+                  if item.get('type') != 'blob' or item.get('mode') not in {'100644', '100755'}:
+                      raise SystemExit('Unexpected linked or non-file application input.')
+                  inventory[name] = (item['mode'], item['sha'])
+              if not inventory or 'macos-store/build-store.sh' not in inventory:
+                  raise SystemExit('The application source inventory is incomplete.')
+              return inventory
+          original = source_files(binary_sha)
+          current = source_files(current_sha)
+          if original != current:
+              changed = sorted(name for name in set(original) | set(current) if original.get(name) != current.get(name))
+              raise SystemExit('Application inputs changed; reuse of tested binaries is forbidden: ' + ', '.join(changed))
+          package_script = pathlib.Path('macos-store/distribution/package-store.sh')
+          if package_script.is_symlink() or not package_script.is_file():
+              raise SystemExit('Missing current distribution package script.')
+          provenance = {
+              'binarySourceRunId': source_run_id, 'binarySourceCommit': binary_sha,
+              'binarySourceWorkflowPath': '.github/workflows/macos-store.yml',
+              'packagingSourceCommit': current_sha,
+              'packagingScriptSha256': hashlib.sha256(package_script.read_bytes()).hexdigest(),
+              'applicationInputsUnchanged': True, 'applicationInputCount': len(current),
+              'originalArtifactIds': [14535904526, 14536019142],
+              'originalNativeJobIds': [135622646437, 135622709615],
+          }
+          (pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-recovery-provenance.json').write_text(
+              json.dumps(provenance, indent=2) + '\n')
+          print('PASS: both native jobs passed; fixed artifacts verified; every non-distribution application input is unchanged.')
+          PY
+      - name: Download the fixed tested Apple Silicon candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          artifact-ids: '14535904526'
+          path: ${{ runner.temp }}/store-candidate-input/arm64
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: '44537236242'
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Download the fixed tested Intel candidate
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          artifact-ids: '14536019142'
+          path: ${{ runner.temp }}/store-candidate-input/x86_64
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: '44537236242'
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Validate candidate archives before extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, stat, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-candidate-input'
+          app_name = 'Toplu UDF PDF Cevirici.app'
+          for architecture in ('arm64', 'x86_64'):
+              archive = root / architecture / ('Store-candidate-' + architecture + '.zip')
+              if not archive.is_file() or archive.is_symlink() or archive.stat().st_size > 64 * 1024 * 1024:
+                  raise SystemExit('Missing or oversized native candidate archive.')
+              if set(path.name for path in archive.parent.iterdir()) != {archive.name}:
+                  raise SystemExit('Unexpected files in the native artifact.')
+              with zipfile.ZipFile(archive) as bundle:
+                  entries = bundle.infolist()
+                  if len(entries) > 512 or sum(item.file_size for item in entries) > 128 * 1024 * 1024:
+                      raise SystemExit('Unexpected candidate archive size or entry count.')
+                  seen = set()
+                  for item in entries:
+                      path = pathlib.PurePosixPath(item.filename)
+                      canonical = path.as_posix().rstrip('/').casefold()
+                      mode = item.external_attr >> 16
+                      if (not path.parts or path.is_absolute() or '..' in path.parts or
+                          '\\' in item.filename or ':' in item.filename or
+                          path.parts[0] not in (app_name, '__MACOSX') or canonical in seen or
+                          stat.S_ISLNK(mode) or mode & 0o6000 or item.flag_bits & 1):
+                          raise SystemExit('Unsafe or unexpected entry in candidate archive.')
+                      seen.add(canonical)
+                  if app_name + '/Contents/MacOS/UdfPdf' not in bundle.namelist():
+                      raise SystemExit('The candidate has no app executable.')
+          PY
+          mkdir "$RUNNER_TEMP/store-arm64" "$RUNNER_TEMP/store-x86_64"
+          ditto -x -k "$RUNNER_TEMP/store-candidate-input/arm64/Store-candidate-arm64.zip" "$RUNNER_TEMP/store-arm64"
+          ditto -x -k "$RUNNER_TEMP/store-candidate-input/x86_64/Store-candidate-x86_64.zip" "$RUNNER_TEMP/store-x86_64"
+      - name: Verify matching resources, metadata and sandbox signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm="$RUNNER_TEMP/store-arm64/Toplu UDF PDF Cevirici.app"
+          intel="$RUNNER_TEMP/store-x86_64/Toplu UDF PDF Cevirici.app"
+          codesign --verify --deep --strict "$arm"
+          codesign --verify --deep --strict "$intel"
+          [[ "$(lipo -archs "$arm/Contents/MacOS/UdfPdf")" == arm64 ]]
+          [[ "$(lipo -archs "$intel/Contents/MacOS/UdfPdf")" == x86_64 ]]
+          codesign --display --entitlements :- "$arm" > "$RUNNER_TEMP/store-arm-entitlements.plist" 2>/dev/null
+          codesign --display --entitlements :- "$intel" > "$RUNNER_TEMP/store-intel-entitlements.plist" 2>/dev/null
+          python3 - <<'PY'
+          import hashlib, os, pathlib, plistlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          arm = root / 'store-arm64/Toplu UDF PDF Cevirici.app'
+          intel = root / 'store-x86_64/Toplu UDF PDF Cevirici.app'
+          expected_entitlements = plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes())
+          expected_info = {
+              'CFBundleIdentifier': 'org.analizhukuk.udfpdf.mac',
+              'CFBundleShortVersionString': '1.0.4', 'CFBundleVersion': '2',
+              'CFBundleExecutable': 'UdfPdf', 'AHStoreTestingBuild': False,
+              'LSMinimumSystemVersion': '13.0',
+              'LSApplicationCategoryType': 'public.app-category.productivity',
+          }
+          def contents(app):
+              inventory = {}
+              for path in app.rglob('*'):
+                  if path.is_symlink():
+                      raise SystemExit('Symlinks are not permitted in this single-executable app.')
+                  if not path.is_file():
+                      continue
+                  relative = path.relative_to(app).as_posix()
+                  if relative.startswith('Contents/_CodeSignature/') or relative == 'Contents/MacOS/UdfPdf':
+                      continue
+                  if relative != 'Contents/Info.plist' and not relative.startswith('Contents/Resources/'):
+                      raise SystemExit('Unexpected file in the native candidate bundle.')
+                  if path.suffix.lower() in {'.java', '.jar', '.class', '.dylib'}:
+                      raise SystemExit('Java and extra code libraries must not be bundled.')
+                  inventory[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+              info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+              if any(info.get(key) != value for key, value in expected_info.items()):
+                  raise SystemExit('Candidate metadata differs from the reviewed release.')
+              if 'Contents/Resources/PrivacyInfo.xcprivacy' not in inventory:
+                  raise SystemExit('The candidate is missing its privacy declaration.')
+              return inventory
+          if contents(arm) != contents(intel):
+              raise SystemExit('Native candidate resources or Info.plist differ; do not merge them.')
+          for name in ('store-arm-entitlements.plist', 'store-intel-entitlements.plist'):
+              if plistlib.loads((root / name).read_bytes()) != expected_entitlements:
+                  raise SystemExit('A native candidate has unexpected sandbox entitlements.')
+          print('PASS: identical resources and metadata, correct native slices and sandbox entitlements.')
+          PY
+      - name: Combine the tested binary slices and reseal the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/store-universal" "$RUNNER_TEMP/store-universal-output"
+          arm="$RUNNER_TEMP/store-arm64/Toplu UDF PDF Cevirici.app"
+          intel="$RUNNER_TEMP/store-x86_64/Toplu UDF PDF Cevirici.app"
+          app="$RUNNER_TEMP/store-universal/Toplu UDF PDF Cevirici.app"
+          ditto "$arm" "$app"
+          lipo -create "$arm/Contents/MacOS/UdfPdf" "$intel/Contents/MacOS/UdfPdf" -output "$app/Contents/MacOS/UdfPdf"
+          codesign --force --options runtime --generate-entitlement-der \
+            --entitlements macos-store/Store.entitlements --sign - "$app"
+          lipo "$app/Contents/MacOS/UdfPdf" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
+          codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-universal-entitlements.plist" 2>/dev/null
+          python3 - <<'PY'
+          import os, pathlib, plistlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          actual = plistlib.loads((root / 'store-universal-entitlements.plist').read_bytes())
+          expected = plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes())
+          if actual != expected:
+              raise SystemExit('Universal app has unexpected sandbox entitlements.')
+          app = root / 'store-universal/Toplu UDF PDF Cevirici.app'
+          for path in [app, *app.rglob('*')]:
+              if path.is_symlink():
+                  raise SystemExit('Unexpected symlink in the universal app.')
+              attributes = subprocess.run(['/usr/bin/xattr', str(path)], check=True,
+                                          capture_output=True, text=True).stdout.splitlines()
+              if 'com.apple.quarantine' in attributes:
+                  raise SystemExit('Remove the quarantine attribute from the built app before Store upload.')
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/store-universal-output/Store-universal-candidate.zip"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-universal-output'
+          archive = output / 'Store-universal-candidate.zip'
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          (output / 'Store-universal-candidate.zip.sha256').write_text(digest + '  ' + archive.name + '\n')
+          provenance = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-recovery-provenance.json').read_text())
+          (output / 'candidate.json').write_text(json.dumps({
+              **provenance,
+              'schemaVersion': 1, 'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflowPath': '.github/workflows/macos-store-recover.yml',
+              'sourceRunId': os.environ['GITHUB_RUN_ID'], 'sourceCommit': os.environ['GITHUB_SHA'],
+              'bundleIdentifier': 'org.analizhukuk.udfpdf.mac', 'version': '1.0.4', 'build': '2',
+              'architectures': ['arm64', 'x86_64'], 'archiveSha256': digest,
+              'signature': 'ad-hoc sandbox candidate', 'published': False,
+          }, indent=2) + '\n')
+          PY
+          printf '### Universal Store candidate\n\nReused the fixed tested ARM and Intel artifacts from run 44537236242 after verifying both successful native jobs and unchanged application inputs. Resource and metadata comparison, both native signatures and the universal sandbox signature passed. This is an ad-hoc candidate, not a published Store build.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the universal Store candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: Store-universal-candidate
+          path: ${{ runner.temp }}/store-universal-output
+          if-no-files-found: error
+          retention-days: 14
+
