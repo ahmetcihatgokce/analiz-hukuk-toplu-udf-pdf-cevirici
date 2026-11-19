@@ -153,11 +153,20 @@ enum NativeUDFSelfTest {
                       let half = appearances["half"], let plain = appearances["default"] else {
                     throw Failure(message: "ARGB appearance comparison is incomplete")
                 }
-                let diagnostics = "transparent={\(transparent.diagnostics)} opaque={\(opaque.diagnostics)} half={\(half.diagnostics)} default={\(plain.diagnostics)}"
+                let controlURL = root.appendingPathComponent("alpha-independent-control.pdf")
+                try createOpaqueRedControl(at: controlURL)
+                let controlPDF = try openPDF(controlURL)
+                guard let controlPage = controlPDF.page(at: 0) else {
+                    throw Failure(message: "Independent AppKit red control has no page")
+                }
+                let control = try alphaAppearance(controlPage)
+                let diagnostics = "transparent={\(transparent.diagnostics)} opaque={\(opaque.diagnostics)} half={\(half.diagnostics)} default={\(plain.diagnostics)} control={\(control.diagnostics)}"
                 print("UDF_ALPHA_DIAGNOSTIC \(diagnostics)")
                 try require(transparent.inkPixels == 0, "Zero-alpha red became visible in the PDF: \(diagnostics)")
-                try require(opaque.redPixels > 25 && opaque.minimumRedGreen < 0.15,
-                            "Opaque signed ARGB red did not produce strong red glyph pixels: \(diagnostics)")
+                try require(control.redPixels > 100, "Independent AppKit red control did not rasterize: \(diagnostics)")
+                try require(opaque.redPixels > 25 && abs(opaque.minimumRedGreen - control.minimumRedGreen) <= 0.03
+                            && abs(opaque.coreRed - control.coreRed) <= 0.05 && abs(opaque.coreBlue - control.coreBlue) <= 0.05,
+                            "Opaque signed ARGB glyph color differs from the independent AppKit red control: \(diagnostics)")
                 try require(half.redPixels > 25 && half.minimumRedGreen > 0.3 && half.minimumRedGreen < 0.8,
                             "Half-alpha red was not visibly blended over white paper: \(diagnostics)")
                 try require(half.minimumRedGreen > opaque.minimumRedGreen + 0.2,
@@ -532,9 +541,32 @@ enum NativeUDFSelfTest {
     private struct AlphaAppearance {
         let inkPixels, redPixels, blackPixels: Int
         let minimumRedGreen: CGFloat
+        let coreRed, coreBlue: CGFloat
         var diagnostics: String {
-            "ink=\(inkPixels),red=\(redPixels),black=\(blackPixels),minRedGreen=\(minimumRedGreen)"
+            "ink=\(inkPixels),red=\(redPixels),black=\(blackPixels),coreRGB=\(coreRed):\(minimumRedGreen):\(coreBlue)"
         }
+    }
+
+    private static func createOpaqueRedControl(at output: URL) throws {
+        let data = NSMutableData()
+        var media = CGRect(x: 0, y: 0, width: 595.28, height: 841.89)
+        guard let font = NSFont(name: "Times New Roman", size: 24) ?? NSFont(name: "TimesNewRomanPSMT", size: 24),
+              let consumer = CGDataConsumer(data: data),
+              let context = CGContext(consumer: consumer, mediaBox: &media, nil) else {
+            throw Failure(message: "Independent AppKit control PDF cannot be created")
+        }
+        context.beginPDFPage(nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        // Direct known-color text exercises AppKit's colored-glyph PDF path
+        // without consulting the UDF parser, renderer or ARGB color helper.
+        NSAttributedString(string: "ALPHA_TEST", attributes: [
+            .font: font, .foregroundColor: NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1),
+        ]).draw(at: CGPoint(x: 50, y: 750))
+        NSGraphicsContext.restoreGraphicsState()
+        context.endPDFPage()
+        context.closePDF()
+        try (data as Data).write(to: output, options: .atomic)
     }
 
     private static func alphaAppearance(_ page: PDFPage) throws -> AlphaAppearance {
@@ -549,6 +581,7 @@ enum NativeUDFSelfTest {
         }
         var inkPixels = 0, redPixels = 0, blackPixels = 0
         var minimumRedGreen = CGFloat.infinity
+        var coreRed: CGFloat = -1, coreBlue: CGFloat = -1
         // Exclude only the external thumbnail frame. Fixture text is well within
         // the declared margins. Composite any transparent bitmap pixels over
         // white paper before comparing their visible appearance.
@@ -563,12 +596,16 @@ enum NativeUDFSelfTest {
                 if max(red, green, blue) < 0.2 { blackPixels += 1 }
                 if red - green > 0.1 && red - blue > 0.1 {
                     redPixels += 1
-                    minimumRedGreen = min(minimumRedGreen, green)
+                    if green < minimumRedGreen {
+                        minimumRedGreen = green
+                        coreRed = red
+                        coreBlue = blue
+                    }
                 }
             }
         }
         return AlphaAppearance(inkPixels: inkPixels, redPixels: redPixels, blackPixels: blackPixels,
-                               minimumRedGreen: minimumRedGreen)
+                               minimumRedGreen: minimumRedGreen, coreRed: coreRed, coreBlue: coreBlue)
     }
 
     private static func requireTableGrid(page: PDFPage, upperLeft: PDFSelection,
