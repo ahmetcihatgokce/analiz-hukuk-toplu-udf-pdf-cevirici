@@ -86,6 +86,23 @@ enum NativeUDFSelfTest {
                 try require(pdf.pageCount == 1, "Short UTF16 fixture unexpectedly paginated")
             }
 
+            check("CRLF paragraph suffix removal preserves the preceding final letter") {
+                var fixture = Fixture()
+                let body = fixture.paragraph("CRLF_FINAL_LETTER_Z\r\n")
+                // Numeric references preserve CR+LF after XML's input newline normalization.
+                let source = String(decoding: fixture.xml(body: body), as: UTF8.self)
+                    .replacingOccurrences(of: "\r\n", with: "&#13;&#10;")
+                let parsed = try UDFDocument.parse(xml: Data(source.utf8))
+                guard let first = parsed.body.first, case .paragraph(let paragraph) = first,
+                      let run = paragraph.runs.first else {
+                    throw Failure(message: "CRLF test did not create a text run")
+                }
+                try require(run.text == "CRLF_FINAL_LETTER_Z", "CRLF trimming removed a real text character")
+                let output = root.appendingPathComponent("crlf-final-letter.pdf")
+                try UDFRenderer.render(parsed, to: output)
+                try requireText(openPDF(output), contains: ["CRLF_FINAL_LETTER_Z"])
+            }
+
             check("font size and bold styling survive PDF rendering") {
                 var fixture = Fixture()
                 let body = fixture.paragraph("BOLD_SENTINEL\n", style: "bold=\"true\" size=\"18\"")
@@ -142,6 +159,14 @@ enum NativeUDFSelfTest {
                 try require(try redPixelCount(page) > 100, "Image was missing or rendered invisibly")
             }
 
+            check("fail closed: an image range cannot consume real document text") {
+                var fixture = Fixture()
+                fixture.text = "X\n"
+                let image = try redPNG()
+                let body = "<paragraph><image width=\"96\" height=\"48\" imageData=\"\(image.base64EncodedString())\" startOffset=\"0\" length=\"1\"/><content startOffset=\"1\" length=\"1\"/></paragraph>"
+                try mustReject { _ = try UDFDocument.parse(xml: fixture.xml(body: body)) }
+            }
+
             check("explicit page break and header/footer repeat on each page") {
                 var fixture = Fixture()
                 let first = fixture.paragraph("FIRST_PAGE_SENTINEL\n")
@@ -170,11 +195,33 @@ enum NativeUDFSelfTest {
                 let output = root.appendingPathComponent("long-pagination.pdf")
                 try UDFRenderer.render(UDFDocument.parse(xml: fixture.xml(body: body)), to: output)
                 let pdf = try openPDF(output)
-                try require((2...8).contains(pdf.pageCount), "160 paragraphs have an implausible page count: \(pdf.pageCount)")
+                try require(pdf.pageCount == 3, "Official exporter uses three A4 pages for these 160 paragraphs; native produced \(pdf.pageCount)")
                 for marker in markers {
                     try require(pdf.findString(marker, withOptions: []).count == 1, "Paragraph was omitted or duplicated: \(marker)")
                 }
                 try requireA4(pdf)
+            }
+
+            check("an intentional empty paragraph retains exactly one additional line of space") {
+                func lineGap(includeBlank: Bool, name: String) throws -> CGFloat {
+                    var fixture = Fixture()
+                    let first = fixture.paragraph("ABOVE_BLANK_SENTINEL\n")
+                    let blank = includeBlank ? fixture.paragraph("\n") : ""
+                    let last = fixture.paragraph("BELOW_BLANK_SENTINEL\n")
+                    let output = root.appendingPathComponent(name + ".pdf")
+                    try UDFRenderer.render(UDFDocument.parse(xml: fixture.xml(body: first + blank + last)), to: output)
+                    let pdf = try openPDF(output)
+                    guard pdf.pageCount == 1, let page = pdf.page(at: 0),
+                          let above = pdf.findString("ABOVE_BLANK_SENTINEL", withOptions: []).first,
+                          let below = pdf.findString("BELOW_BLANK_SENTINEL", withOptions: []).first else {
+                        throw Failure(message: "Empty-paragraph fixture did not render both markers")
+                    }
+                    return abs(above.bounds(for: page).midY - below.bounds(for: page).midY)
+                }
+                let normal = try lineGap(includeBlank: false, name: "ordinary-line-pitch")
+                let withBlank = try lineGap(includeBlank: true, name: "intentional-empty-paragraph")
+                try require(normal > 5, "Ordinary paragraph line pitch is invalid")
+                try require(abs(withBlank - 2 * normal) < 1, "Intentional empty paragraph was dropped or expanded twice: ordinary=\(normal), blank=\(withBlank)")
             }
 
             let baselineSource = String(decoding: baselineXML, as: UTF8.self)

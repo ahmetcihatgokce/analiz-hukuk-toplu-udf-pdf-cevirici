@@ -21,7 +21,12 @@ enum UDFRenderer {
         layout.manager.enumerateLineFragments(forGlyphRange: layout.range) { rectangle, used, _, range, _ in
             lines.append("glyphs=\(range.location):\(range.length),line=\(NSStringFromRect(rectangle)),used=\(NSStringFromRect(used))")
         }
-        print("UDF_LAYOUT_DIAGNOSTIC chars=\(layout.storage.length) glyphs=\(layout.range.location):\(layout.range.length) usedHeight=\(layout.usedHeight) usedRect=\(NSStringFromRect(layout.manager.usedRect(for: layout.container))) extra=\(NSStringFromRect(layout.manager.extraLineFragmentRect)) lines=\(lines.joined(separator: ";"))")
+        var fontMetrics = "none"
+        if layout.storage.length > 0,
+           let font = layout.storage.attribute(.font, at: 0, effectiveRange: nil) as? NSFont {
+            fontMetrics = "\(font.fontName),size=\(font.pointSize),ascent=\(font.ascender),descent=\(font.descender),leading=\(font.leading)"
+        }
+        print("UDF_LAYOUT_DIAGNOSTIC chars=\(layout.storage.length) glyphs=\(layout.range.location):\(layout.range.length) usedHeight=\(layout.usedHeight) usedRect=\(NSStringFromRect(layout.manager.usedRect(for: layout.container))) extra=\(NSStringFromRect(layout.manager.extraLineFragmentRect)) font=\(fontMetrics) lines=\(lines.joined(separator: ";"))")
     }
 #endif
 
@@ -186,7 +191,7 @@ enum UDFRenderer {
             self.container = container
             self.range = manager.glyphRange(for: container)
             self.size = size
-            self.usedHeight = manager.usedRect(for: container).maxY
+            self.usedHeight = Self.contentHeight(manager: manager, container: container)
 #if STORE_TESTING
             UDFRenderer.diagnose(self)
 #endif
@@ -199,7 +204,7 @@ enum UDFRenderer {
             self.container = container
             self.range = range
             self.size = size
-            self.usedHeight = manager.usedRect(for: container).maxY
+            self.usedHeight = Self.contentHeight(manager: manager, container: container)
 #if STORE_TESTING
             UDFRenderer.diagnose(self)
 #endif
@@ -207,11 +212,27 @@ enum UDFRenderer {
 
         var isComplete: Bool { NSMaxRange(range) == manager.numberOfGlyphs }
 
+        private static func contentHeight(manager: NSLayoutManager, container: NSTextContainer) -> CGFloat {
+            let used = manager.usedRect(for: container)
+            let extra = manager.extraLineFragmentRect
+            // The insertion-point line after a terminal paragraph separator has
+            // no glyph. It is useful to an editable text view, but it must not
+            // become a second blank line after every independently laid-out UDF
+            // paragraph. Real blank paragraphs have their own newline glyphs;
+            // their line fragments remain before this extra fragment.
+            if manager.extraLineFragmentTextContainer === container,
+               !extra.isEmpty, extra.origin.y.isFinite, extra.height.isFinite,
+               extra.minY >= 0, extra.minY <= used.maxY + 0.5 {
+                return min(used.maxY, extra.minY)
+            }
+            return used.maxY
+        }
+
         func validateBounds() throws {
             let used = manager.usedRect(for: container)
             let ink = manager.boundingRect(forGlyphRange: range, in: container)
             guard manager.glyphRange(for: container) == range,
-                  abs(used.maxY - usedHeight) <= 0.5,
+                  abs(Self.contentHeight(manager: manager, container: container) - usedHeight) <= 0.5,
                   used.origin.x.isFinite, used.origin.y.isFinite, used.width.isFinite, used.height.isFinite,
                   used.minX >= -3, used.maxX <= size.width + 3,
                   used.minY >= -0.5, used.maxY <= size.height + 0.5 else {

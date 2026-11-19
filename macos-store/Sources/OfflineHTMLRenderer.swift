@@ -28,13 +28,16 @@ enum OfflineHTMLRenderer {
         }
         html = replacing("<!DOCTYPE[^>]*>|<\\?xml[^>]*\\?>", in: html, with: "")
         html = replacing("(charset\\s*=\\s*[\"']?)[a-zA-Z0-9_-]+", in: html, with: "$1utf-8")
-        let source = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" + html
+        // An XML processing instruction would force ordinary HTML (including
+        // void elements such as <meta>) into the strict XML parsing path.
+        html = closeVoidElements(html)
         let document: XMLDocument
         do {
-            document = try XMLDocument(xmlString: source,
+            document = try XMLDocument(data: Data(html.utf8),
                 options: [.documentTidyHTML, .nodeLoadExternalEntitiesNever])
         } catch {
-            throw ConversionFailure("HTML belgesi güvenli biçimde okunamadı.")
+            let details = error as NSError
+            throw ConversionFailure("HTML belgesi güvenli biçimde okunamadı (\(details.domain), \(details.code)).")
         }
         guard let root = document.rootElement() else {
             throw ConversionFailure("HTML belgesinin içeriği bulunamadı.")
@@ -240,6 +243,40 @@ enum OfflineHTMLRenderer {
               !matches("@|(?:https?|file|ftp|data|javascript):|behavior\\s*:|position\\s*:\\s*(?:absolute|fixed)|display\\s*:\\s*(?:grid|flex)|(?:transform|float)\\s*:", in: normalized) else {
             throw ConversionFailure("HTML belgesindeki çevrimiçi kaynak veya gelişmiş sayfa düzeni yerel metin dönüşümünde desteklenmiyor.")
         }
+    }
+
+    private static func closeVoidElements(_ html: String) -> String {
+        let voidNames: Set<String> = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]
+        let bytes = Array(html.utf8)
+        var result = Data()
+        result.reserveCapacity(bytes.count)
+        var index = 0
+        while index < bytes.count {
+            guard bytes[index] == 60 else { result.append(bytes[index]); index += 1; continue }
+            let start = index
+            var quote: UInt8?
+            index += 1
+            while index < bytes.count {
+                let byte = bytes[index]
+                if let active = quote {
+                    if byte == active { quote = nil }
+                } else if byte == 34 || byte == 39 {
+                    quote = byte
+                } else if byte == 62 { break }
+                index += 1
+            }
+            guard index < bytes.count else { result.append(contentsOf: bytes[start...]); break }
+            var nameEnd = start + 1
+            while nameEnd < index, (65...90).contains(bytes[nameEnd]) || (97...122).contains(bytes[nameEnd]) { nameEnd += 1 }
+            let name = String(decoding: bytes[(start + 1)..<nameEnd], as: UTF8.self).lowercased()
+            var beforeClose = index - 1
+            while beforeClose > start, [9, 10, 13, 32].contains(bytes[beforeClose]) { beforeClose -= 1 }
+            result.append(contentsOf: bytes[start..<index])
+            if voidNames.contains(name), bytes[beforeClose] != 47 { result.append(47) }
+            result.append(62)
+            index += 1
+        }
+        return String(decoding: result, as: UTF8.self)
     }
 
     private static func matches(_ pattern: String, in text: String) -> Bool {

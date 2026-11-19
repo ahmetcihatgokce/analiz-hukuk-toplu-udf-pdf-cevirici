@@ -12,7 +12,7 @@ struct UDFPageFormat {
 }
 
 enum UDFAlignment { case left, center, right, justified }
-enum UDFTableBorder { case none, outer, grid }
+enum UDFTableBorder: Equatable { case none, outer, grid }
 enum UDFField { case pageNumber, pageCount }
 
 struct UDFCharacterStyle {
@@ -333,7 +333,9 @@ private final class UDFModelBuilder {
             if let index = runs.indices.last, runs[index].image == nil, runs[index].field == nil {
                 let run = runs[index]
                 var text = run.text
-                if text.hasSuffix("\r\n") { text.removeLast(2) }
+                // Swift treats CRLF as one extended grapheme cluster. Removing
+                // two Characters would also delete the final document letter.
+                if text.hasSuffix("\r\n") { text = (text as NSString).substring(to: (text as NSString).length - 2) }
                 else if text.hasSuffix("\n") || text.hasSuffix("\r") { text.removeLast() }
                 runs[index] = UDFRun(text: text, style: run.style, image: nil, field: nil)
             }
@@ -341,7 +343,7 @@ private final class UDFModelBuilder {
         case "table": return .table(try table(node, inherited: attributes))
         case "image":
             try validate(node, allowed: imageKeys.union(referenceKeys).union(rangeKeys))
-            if hasRange(node) { _ = try slice(node, fallback: "") }
+            try validateImageRange(node)
             return .image(try image(node))
         case "page-break", "pagebreak":
             try validate(node, allowed: [])
@@ -364,7 +366,7 @@ private final class UDFModelBuilder {
             return try textRun(node, inherited: attributes, fallback: node.name == "tab" ? "\t" : " ")
         case "image":
             try validate(node, allowed: imageKeys.union(characterKeys).union(referenceKeys).union(rangeKeys))
-            if hasRange(node) { _ = try slice(node, fallback: "") }
+            try validateImageRange(node)
             return UDFRun(text: "", style: characterStyle, image: try image(node), field: nil)
         case "field":
             try validate(node, allowed: characterKeys.union(referenceKeys).union(rangeKeys).union(["fieldname"]))
@@ -386,33 +388,110 @@ private final class UDFModelBuilder {
     }
 
     private func table(_ node: UDFXMLNode, inherited: [String: String]) throws -> UDFTable {
-        try validate(node, allowed: characterKeys.union(paragraphKeys).union(referenceKeys).union(["border", "width", "columnwidths"]))
+        try validate(node, allowed: characterKeys.union(paragraphKeys).union(referenceKeys).union(["border", "width", "columnwidths", "columnspans", "columncount", "tablename"]))
         guard !node.children.isEmpty, node.children.count <= 4096 else { throw UDFParseError("UDF tablosunun satır sayısı geçersiz.") }
+        try metadataName(node.attributes["tablename"], name: "tableName")
+        if let alignment = node.attributes["alignment"], !["0", "left"].contains(alignment.lowercased()) {
+            throw UDFParseError("Sola hizalı olmayan UDF tablosu henüz desteklenmiyor.")
+        }
+        let border = try tableBorder(node.attributes["border"] ?? "borderAll")
+        let declaredColumns = try node.attributes["columncount"].map { try integer($0, fallback: 1, min: 1, max: 128, name: "columnCount") }
+        guard node.attributes["columnspans"] == nil || node.attributes["columnwidths"] == nil else {
+            throw UDFParseError("UDF tablo sütun ölçüleri iki farklı biçimde tanımlanmış.")
+        }
+        let widths = try numberList(node.attributes["columnspans"] ?? node.attributes["columnwidths"], min: 1, max: 5000, name: "columnSpans")
+        if let count = declaredColumns, !widths.isEmpty, count != widths.count {
+            throw UDFParseError("UDF sütun sayısı ile sütun ölçüleri uyuşmuyor.")
+        }
         let rows = try node.children.map { row -> UDFRow in
             guard row.name == "row" else { throw UDFParseError("UDF tablosunda desteklenmeyen öğe: \(row.name)") }
-            try validate(row, allowed: characterKeys.union(paragraphKeys).union(referenceKeys))
-            guard !row.children.isEmpty, row.children.count <= 128 else { throw UDFParseError("UDF tablo sütun sayısı geçersiz.") }
+            try validate(row, allowed: characterKeys.union(paragraphKeys).union(referenceKeys).union(["rowname", "rowtype", "border"]))
+            try metadataName(row.attributes["rowname"], name: "rowName")
+            if let type = row.attributes["rowtype"], type != "dataRow" {
+                throw UDFParseError("UDF tablo satırı türü henüz desteklenmiyor: \(type)")
+            }
+            if let declaredBorder = row.attributes["border"], try tableBorder(declaredBorder) != border {
+                throw UDFParseError("Farklı satır kenarlıkları olan UDF tablosu henüz desteklenmiyor.")
+            }
+            guard row.children.count <= 128 else { throw UDFParseError("UDF tablo sütun sayısı geçersiz.") }
             let rowAttributes = try resolved(row, inherited: inherited)
             return UDFRow(cells: try row.children.map { cell in
                 guard cell.name == "cell" else { throw UDFParseError("UDF satırında desteklenmeyen öğe: \(cell.name)") }
-                try validate(cell, allowed: characterKeys.union(paragraphKeys).union(referenceKeys).union(["colspan", "columnspan", "rowspan", "width"]))
+                try validate(cell, allowed: characterKeys.union(paragraphKeys).union(referenceKeys).union(["colspan", "columnspan", "rowspan", "width", "align", "fillcolor", "border", "borderspec"]))
+                if let align = cell.attributes["align"], align.lowercased() != "top" {
+                    throw UDFParseError("Üste hizalı olmayan UDF hücresi henüz desteklenmiyor.")
+                }
+                let expectedCellBorder: UDFTableBorder = border == .grid ? .grid : .none
+                if let declaredBorder = cell.attributes["border"], try tableBorder(declaredBorder) != expectedCellBorder {
+                    throw UDFParseError("Farklı hücre kenarlıkları olan UDF tablosu henüz desteklenmiyor.")
+                }
+                if let specification = cell.attributes["borderspec"] {
+                    let bits = try integer(specification, fallback: 15, min: 0, max: 15, name: "borderSpec")
+                    guard bits == 15 || (bits == 0 && expectedCellBorder == .none) else {
+                        throw UDFParseError("Kısmi kenarlıklı UDF hücresi henüz desteklenmiyor.")
+                    }
+                }
+                if let colspan = cell.attributes["colspan"], let alias = cell.attributes["columnspan"], colspan != alias {
+                    throw UDFParseError("UDF hücresinde çelişen sütun birleştirme ölçüleri var.")
+                }
                 let attributes = try resolved(cell, inherited: rowAttributes)
                 let columnSpan = try integer(cell.attributes["columnspan"] ?? cell.attributes["colspan"], fallback: 1, min: 1, max: 128, name: "columnSpan")
                 let rowSpan = try integer(cell.attributes["rowspan"], fallback: 1, min: 1, max: 4096, name: "rowSpan")
+                if let fill = cell.attributes["fillcolor"], let background = cell.attributes["background"], try color(fill) != color(background) {
+                    throw UDFParseError("UDF hücresinde çelişen arka plan renkleri var.")
+                }
                 return UDFCell(blocks: try cell.children.map { try block($0, inherited: attributes) }, columnSpan: columnSpan, rowSpan: rowSpan,
-                    width: try optionalNumber(cell.attributes["width"], min: 1, max: 5000, name: "cell width"), backgroundRGB: try color(attributes["background"]))
+                    width: try optionalNumber(cell.attributes["width"], min: 1, max: 5000, name: "cell width"), backgroundRGB: try color(cell.attributes["fillcolor"] ?? attributes["background"]))
             })
         }
-        let border: UDFTableBorder
-        switch node.attributes["border"]?.lowercased() ?? "borderall" {
-        case "none", "bordernone": border = .none
-        case "borderouter", "outer": border = .outer
-        case "borderall", "all", "grid": border = .grid
-        default: throw UDFParseError("UDF tablo kenarlığı henüz desteklenmiyor.")
+        try validateTableGrid(rows, expectedColumns: declaredColumns ?? (widths.isEmpty ? nil : widths.count))
+        let explicitWidth = try optionalNumber(node.attributes["width"], min: 1, max: 5000, name: "table width")
+        let measuredWidth = widths.isEmpty ? nil : widths.reduce(0, +)
+        if let explicit = explicitWidth, let measured = measuredWidth, abs(explicit - measured) > 1 {
+            throw UDFParseError("UDF tablo genişliği ile sütun ölçülerinin toplamı uyuşmuyor.")
         }
-        let widths = try numberList(node.attributes["columnwidths"], min: 1, max: 5000, name: "columnWidths")
-        return UDFTable(rows: rows, columnWidths: widths, border: border,
-            width: try optionalNumber(node.attributes["width"], min: 1, max: 5000, name: "table width"))
+        return UDFTable(rows: rows, columnWidths: widths, border: border, width: explicitWidth ?? measuredWidth)
+    }
+
+    private func tableBorder(_ raw: String) throws -> UDFTableBorder {
+        switch raw.lowercased() {
+        case "none", "bordernone": return .none
+        case "borderouter", "outer": return .outer
+        case "bordercell", "borderall", "all", "grid": return .grid
+        default: throw UDFParseError("UDF tablo kenarlığı henüz desteklenmiyor: \(raw)")
+        }
+    }
+
+    private func metadataName(_ raw: String?, name: String) throws {
+        guard let raw = raw else { return }
+        guard raw.utf16.count <= 128, !raw.unicodeScalars.contains(where: { $0.value < 32 }) else {
+            throw UDFParseError("UDF tanımlayıcı adı geçersiz: \(name)")
+        }
+    }
+
+    private func validateTableGrid(_ rows: [UDFRow], expectedColumns: Int?) throws {
+        var occupied = Array(repeating: Set<Int>(), count: rows.count)
+        var columns = expectedColumns ?? 0
+        for (index, row) in rows.enumerated() {
+            var column = 0
+            for cell in row.cells {
+                while occupied[index].contains(column) { column += 1 }
+                guard index + cell.rowSpan <= rows.count, column + cell.columnSpan <= 128 else {
+                    throw UDFParseError("UDF tablo hücre birleştirmesi tablo sınırlarının dışında.")
+                }
+                for rowIndex in index..<(index + cell.rowSpan) {
+                    for columnIndex in column..<(column + cell.columnSpan) {
+                        guard occupied[rowIndex].insert(columnIndex).inserted else { throw UDFParseError("UDF tablo hücreleri çakışıyor.") }
+                    }
+                }
+                column += cell.columnSpan
+                columns = max(columns, column)
+            }
+        }
+        guard columns > 0, expectedColumns == nil || columns == expectedColumns,
+              occupied.allSatisfy({ $0.count == columns }) else {
+            throw UDFParseError("UDF tablo sütun sayısı veya hücre yerleşimi tutarsız.")
+        }
     }
 
     private let imageKeys: Set<String> = ["imagedata", "src", "filename", "width", "height"]
@@ -509,7 +588,7 @@ private final class UDFModelBuilder {
             spaceBefore: try number(a["spaceabove"], fallback: 0, min: 0, max: 1000, name: "SpaceAbove"),
             spaceAfter: try number(a["spacebelow"], fallback: 0, min: 0, max: 1000, name: "SpaceBelow"),
             lineSpacing: try number(a["linespacing"], fallback: 0, min: 0, max: 10, name: "LineSpacing"),
-            tabStops: try numberList(a["tabset"], min: 0, max: 5000, name: "TabSet"),
+            tabStops: try tabStopList(a["tabset"]),
             keepTogether: try boolean(a["keeptogether"], name: "keepTogether"),
             keepWithNext: try boolean(a["keepwithnext"], name: "keepWithNext"),
             pageBreakBefore: try boolean(a["pagebreakbefore"], name: "pageBreakBefore"))
@@ -541,6 +620,13 @@ private final class UDFModelBuilder {
     }
 
     private func hasRange(_ node: UDFXMLNode) -> Bool { node.attributes["startoffset"] != nil || node.attributes["length"] != nil }
+    private func validateImageRange(_ node: UDFXMLNode) throws {
+        guard hasRange(node) else { return }
+        let marker = try slice(node, fallback: "")
+        guard marker.isEmpty || marker == "\u{FFFC}" else {
+            throw UDFParseError("UDF görsel aralığı nesne işaretçisi yerine belge metnini kapsıyor; metin kaybına yol açacak PDF üretilmedi.")
+        }
+    }
     private func slice(_ node: UDFXMLNode, fallback: String) throws -> String {
         guard hasRange(node) else { return fallback }
         guard let startText = node.attributes["startoffset"], let lengthText = node.attributes["length"],
@@ -597,6 +683,23 @@ private final class UDFModelBuilder {
         let parts = raw.split(whereSeparator: { $0 == "," || $0 == ";" || $0.isWhitespace })
         guard parts.count <= 128 else { throw UDFParseError("UDF sayısal listesi çok uzun: \(name)") }
         return try parts.map { try number(String($0), fallback: 0, min: min, max: max, name: name) }
+    }
+    private func tabStopList(_ raw: String?) throws -> [Double] {
+        guard let raw = raw, !raw.isEmpty else { return [] }
+        guard raw.utf8.count <= 4096 else { throw UDFParseError("UDF sekme listesi boyut sınırını aşıyor.") }
+        let entries = raw.split(whereSeparator: { $0 == "," || $0 == ";" || $0.isWhitespace })
+        guard entries.count <= 128 else { throw UDFParseError("UDF sekme listesi çok uzun.") }
+        var result: [Double] = []
+        for entry in entries {
+            let parts = entry.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 1 || (parts.count == 3 && parts[1] == "0" && parts[2] == "0") else {
+                throw UDFParseError("Sola hizalı ve çizgisiz olmayan UDF sekmesi henüz desteklenmiyor.")
+            }
+            let position = try number(String(parts[0]), fallback: 0, min: 0, max: 5000, name: "TabSet position")
+            guard result.last.map({ position > $0 }) ?? true else { throw UDFParseError("UDF sekme konumları artan sırada olmalıdır.") }
+            result.append(position)
+        }
+        return result
     }
     private func boolean(_ raw: String?, name: String) throws -> Bool {
         switch raw?.lowercased() {

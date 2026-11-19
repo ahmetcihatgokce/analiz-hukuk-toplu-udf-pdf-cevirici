@@ -219,7 +219,7 @@ def main() -> int:
     manifest = json.loads((args.fixtures / "expectations.json").read_text(encoding="utf-8"))
     if manifest.get("syntheticOnly") is not True:
         parser.error("Only generated public synthetic fixtures may be used in this CI comparison")
-    fixtures = [item for item in manifest["fixtures"] if item["result"] == "success"]
+    fixtures = [item for item in manifest["fixtures"] if item["result"] in ["success", "oracle-reject"]]
     results = []
     with tempfile.TemporaryDirectory(prefix="udf-oracle-tools-") as temporary:
         scratch = Path(temporary)
@@ -256,6 +256,20 @@ def main() -> int:
                              "-Djavax.xml.accessExternalDTD=", "-Djavax.xml.accessExternalSchema=", "-cp", classpath,
                              "UyapBridge", str(fixture), str(official_pdf)], timeout=120, cwd=scratch)
             write_log(case / "official.log", oracle)
+            if item["result"] == "oracle-reject":
+                expected = item["expectedOracleError"]
+                expected_rejection = oracle.returncode != 0 and expected in oracle.stdout
+                status = "expected-oracle-unsupported" if expected_rejection else "unexpected-oracle-negative-result"
+                problems = ([] if expected_rejection else
+                            ["Official exporter behavior changed or failed differently; revalidate this oracle-negative fixture"])
+                results.append({"file": name, "status": status, "compatibilityValidated": False,
+                                "oracleLimitation": expected, "problems": problems})
+                print(("PASS " if expected_rejection else "FAIL ") + name
+                      + ": separately classified official JDOM supplementary-character limitation", flush=True)
+                print("ORACLE_LIMITATION " + json.dumps({"file": name, "exitCode": oracle.returncode,
+                                                        "expectedErrorObserved": expected_rejection,
+                                                        "compatibilityValidated": False}, separators=(",", ":")), flush=True)
+                continue
             if oracle.returncode or not official_pdf.is_file():
                 results.append({"file": name, "status": "oracle-rejected-fixture", "problems": ["Official exporter did not accept this fixture; compatibility is unvalidated"]})
                 print("FAIL " + name + ": official exporter did not accept fixture")
@@ -265,6 +279,10 @@ def main() -> int:
                 continue
             native = invoke([str(args.native), "--batch", str(native_input), str(native_output)], timeout=120)
             write_log(case / "native.log", native)
+            layout_lines = [line[:1500] for line in native.stdout.splitlines() if "UDF_LAYOUTDIAG" in line][:8]
+            if layout_lines:
+                print("NATIVE_LAYOUT " + json.dumps({"file": name, "lines": layout_lines},
+                                                    ensure_ascii=False, separators=(",", ":")), flush=True)
             native_pdf_source = native_output / (fixture.stem + ".pdf")
             if native.returncode or not native_pdf_source.is_file():
                 results.append({"file": name, "status": "native-render-failed", "problems": ["Native app did not produce a PDF for an official-exporter-accepted fixture"]})
@@ -294,10 +312,11 @@ def main() -> int:
             results.append({"file": name, "status": status, "problems": problems})
             print(("FAIL " if problems else "PASS ") + name + (": " + "; ".join(problems[:3]) if problems else ""))
 
-    failures = [result for result in results if result["status"] != "matched-synthetic-fixture"]
+    failures = [result for result in results if result["status"] not in ["matched-synthetic-fixture", "expected-oracle-unsupported"]]
     report = {"schemaVersion": 1, "syntheticOnly": True, "boundsTolerancePoints": args.bounds_tolerance,
               "scope": "Synthetic comparison only; not a compatibility claim for arbitrary UDF documents",
-              "results": results, "failures": len(failures)}
+              "results": results, "failures": len(failures),
+              "oracleUnsupportedFixtures": sum(result["status"] == "expected-oracle-unsupported" for result in results)}
     (args.output / "comparison-results.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Compared {len(results)} synthetic fixtures; failures={len(failures)}")
     return 1 if failures else 0

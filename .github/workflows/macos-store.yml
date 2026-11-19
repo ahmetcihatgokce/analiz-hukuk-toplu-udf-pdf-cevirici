@@ -84,6 +84,17 @@ jobs:
             --native-work-root "$STORE_TEST_ROOT/official-native" \
             --bridge-source macos/Resources/UyapBridge.java \
             --output "$RUNNER_TEMP/official-comparison"
+      - name: Measure official font line metrics
+        if: always() && steps.oracle.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/font-metrics"
+          javac --release 8 -encoding UTF-8 -d "$RUNNER_TEMP/font-metrics" macos-store/ci/FontMetricsProbe.java
+          "$UYAP_TEST_JAVA" -Djava.awt.headless=true -cp "$RUNNER_TEMP/font-metrics:$UYAP_TEST_CLASSPATH" FontMetricsProbe
+      - name: Inspect public document writer APIs for synthetic compatibility tests
+        if: always() && steps.oracle.outcome == 'success'
+        continue-on-error: true
+        run: python3 macos-store/ci/inspect-oracle-api.py --output "$RUNNER_TEMP/oracle-api"
       - name: Build release candidate without test entry points
         run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-candidate" --no-zip
       - name: Verify release contents and sandbox
@@ -114,6 +125,7 @@ jobs:
             ~/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests
             ${{ runner.temp }}/store-official-baseline
             ${{ runner.temp }}/official-comparison
+            ${{ runner.temp }}/oracle-api
           if-no-files-found: warn
           retention-days: 14
       - name: Retain tested Store candidate

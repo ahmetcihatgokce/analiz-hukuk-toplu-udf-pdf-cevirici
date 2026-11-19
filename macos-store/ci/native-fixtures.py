@@ -84,6 +84,8 @@ def generate(directory: Path) -> dict:
         xml = document.xml()
         write_udf(directory / name, xml)
         manifest["fixtures"].append({"file": name, "result": "success", "phrases": phrases,
+                                     "schemaStatus": ("official-synthetic-baseline" if name == "baseline.udf"
+                                                      else "candidate-serialization-requires-official-validation"),
                                      "pageCount": pages, "width": 595.28, "height": 841.89})
         return xml
 
@@ -94,8 +96,21 @@ def generate(directory: Path) -> dict:
     baseline_xml = good("baseline.udf", baseline, ["Analiz Hukuk", "Türkçe", "sentetik test"], 1)
 
     unicode_document = Document()
-    unicode_document.paragraph("UTF16 😀 Çağrı İĞÜŞÖÇ ıiğüşöç END_SENTINEL\n")
+    unicode_document.paragraph("UTF16 Çağrı İĞÜŞÖÇ ıiğüşöç e\u0301 END_SENTINEL\n")
     good("utf16.udf", unicode_document, ["UTF16", "Çağrı", "END_SENTINEL"], 1)
+
+    # UYAP 5.4.21's JDOM 0.9 rejects the high surrogate of this valid XML
+    # supplementary character. Retain that observed limitation as a separate
+    # oracle-negative test; native UTF16 safety remains a positive Swift test.
+    unsupported_unicode = Document()
+    unsupported_unicode.paragraph("UTF16 😀 Çağrı İĞÜŞÖÇ ıiğüşöç END_SENTINEL\n")
+    write_udf(directory / "oracle-unsupported-emoji.udf", unsupported_unicode.xml())
+    manifest["fixtures"].append({
+        "file": "oracle-unsupported-emoji.udf", "result": "oracle-reject",
+        "expectedOracleError": "0xd83d is not a legal XML character",
+        "schemaStatus": "official-JDOM-0.9-supplementary-character-limitation",
+        "compatibilityValidated": False,
+    })
 
     styled = Document()
     styled.paragraph("BOLD_SENTINEL\n", text_attrs={"bold": "true", "size": "18"})
@@ -106,28 +121,43 @@ def generate(directory: Path) -> dict:
 
     table_document = Document()
     table_document.paragraph("TABLE_START\n")
-    table = ET.SubElement(table_document.elements, "table", {"border": "borderAll", "columnWidths": "120,220"})
-    for row_values in [("CELL_A1\n", "CELL_B1\n"), ("CELL_A2\n", "CELL_B2\n")]:
-        row = ET.SubElement(table, "row")
+    # Candidate attributes follow the primary udf-cli writer's published output.
+    # Their actual effect remains subject to the official exporter comparison.
+    table = ET.SubElement(table_document.elements, "table", {
+        "tableName": "Sabit", "columnCount": "2", "columnSpans": "120,220",
+        "width": "340", "border": "borderCell",
+    })
+    for row_index, row_values in enumerate([("CELL_A1\n", "CELL_B1\n"), ("CELL_A2\n", "CELL_B2\n")], 1):
+        row = ET.SubElement(table, "row", {"rowName": f"row{row_index}", "rowType": "dataRow", "border": "borderCell"})
         for value in row_values:
-            cell = ET.SubElement(row, "cell", {"columnSpan": "1", "rowSpan": "1"})
+            cell = ET.SubElement(row, "cell", {
+                "colspan": "1", "align": "top", "fillColor": "16777215",
+                "border": "borderCell", "borderSpec": "15",
+            })
             table_document.paragraph(value, parent=cell)
     table_document.paragraph("TABLE_END\n")
     good("table.udf", table_document, ["TABLE_START", "CELL_A1", "CELL_B1", "CELL_A2", "CELL_B2", "TABLE_END"], 1)
 
     image_document = Document()
     image_document.paragraph("IMAGE_SENTINEL\n")
-    ET.SubElement(image_document.elements, "image", {
+    image_paragraph = ET.SubElement(image_document.elements, "paragraph")
+    image_offset = utf16_length("".join(image_document.parts))
+    image_document.parts.append("\uFFFC\n")
+    ET.SubElement(image_paragraph, "image", {
         "width": "96", "height": "48", "imageData": base64.b64encode(red_png()).decode("ascii"),
+        "startOffset": str(image_offset), "length": "1",
     })
+    ET.SubElement(image_paragraph, "content", {"startOffset": str(image_offset + 1), "length": "1"})
     good("image.udf", image_document, ["IMAGE_SENTINEL"], 1)
 
     paginated = Document()
-    paginated.paragraph("FIRST_PAGE_SENTINEL\n")
-    ET.SubElement(paginated.elements, "pageBreak")
-    paginated.paragraph("SECOND_PAGE_SENTINEL\n")
+    # Candidate header-first serialization follows the primary OSS writer;
+    # the official exporter comparison must still validate this assumption.
     header = ET.SubElement(paginated.elements, "header")
     paginated.paragraph("HEADER_SENTINEL\n", parent=header)
+    paginated.paragraph("FIRST_PAGE_SENTINEL\n")
+    ET.SubElement(paginated.elements, "page-break")
+    paginated.paragraph("SECOND_PAGE_SENTINEL\n")
     footer = ET.SubElement(paginated.elements, "footer")
     paginated.paragraph("FOOTER_SENTINEL\n", parent=footer)
     good("headers-pagebreak.udf", paginated, ["FIRST_PAGE_SENTINEL", "SECOND_PAGE_SENTINEL", "HEADER_SENTINEL", "FOOTER_SENTINEL"], 2)
@@ -135,7 +165,8 @@ def generate(directory: Path) -> dict:
     long_document = Document()
     for index in range(160):
         long_document.paragraph(f"LONG_LINE_{index:03d} Türkçe doğrulama.\n")
-    good("long-pagination.udf", long_document, [f"LONG_LINE_{i:03d}" for i in range(160)])
+    # The official UYAP CI oracle rendered this exact fixture on three A4 pages.
+    good("long-pagination.udf", long_document, [f"LONG_LINE_{i:03d}" for i in range(160)], 3)
 
     invalid_xml = {
         "malformed.udf": b"<template><content>unclosed",
