@@ -8,12 +8,12 @@ on:
         description: Successful Mac App Store candidate tests run ID containing the universal artifact
         required: true
         type: string
-        default: '44537236242'
+        default: '44542648585'
       reviewed_sha:
         description: Must match the immutable APPROVED_SOURCE_SHA configured in this workflow
         required: true
         type: string
-        default: 2a559519e8b2b03d1fa5ceb32d0ca5e26d2aed58
+        default: c57aef55607cb2a8397c370cc6bc0c8e52b6e101
 
 permissions:
   contents: read
@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 30
     env:
       # Replace only after the immutable application and packaging source passes CI.
-      APPROVED_SOURCE_SHA: 2a559519e8b2b03d1fa5ceb32d0ca5e26d2aed58
+      APPROVED_SOURCE_SHA: c57aef55607cb2a8397c370cc6bc0c8e52b6e101
       REQUESTED_SOURCE_SHA: ${{ inputs.reviewed_sha }}
       REQUESTED_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
     steps:
@@ -71,7 +71,7 @@ jobs:
           run = read_api('/actions/runs/' + run_id)
           if (str(run.get('id')) != run_id or run.get('status') != 'completed' or
               run.get('conclusion') != 'success' or run.get('head_sha') != approved or
-              run.get('path') != '.github/workflows/macos-store.yml' or
+              run.get('path') != '.github/workflows/macos-store-recover.yml' or
               run.get('repository', {}).get('full_name') != repository or
               run.get('head_repository', {}).get('full_name') != repository or
               run.get('event') not in {'push', 'workflow_dispatch'} or
@@ -124,7 +124,11 @@ jobs:
           metadata = json.loads((root / 'candidate.json').read_text())
           expected = {
               'schemaVersion': 1, 'repository': 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici',
-              'workflowPath': '.github/workflows/macos-store.yml',
+              'workflowPath': '.github/workflows/macos-store-recover.yml',
+              'binarySourceRunId': 44537236242,
+              'binarySourceCommit': '2a559519e8b2b03d1fa5ceb32d0ca5e26d2aed58',
+              'packagingSourceCommit': os.environ['APPROVED_SOURCE_SHA'],
+              'packagingScriptSha256': hashlib.sha256(pathlib.Path('macos-store/distribution/package-store.sh').read_bytes()).hexdigest(),
               'sourceRunId': os.environ['REQUESTED_SOURCE_RUN_ID'],
               'sourceCommit': os.environ['APPROVED_SOURCE_SHA'],
               'bundleIdentifier': 'org.analizhukuk.udfpdf.mac', 'version': '1.0.4', 'build': '2',
