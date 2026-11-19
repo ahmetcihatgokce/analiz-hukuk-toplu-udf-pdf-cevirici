@@ -153,14 +153,16 @@ enum NativeUDFSelfTest {
                       let half = appearances["half"], let plain = appearances["default"] else {
                     throw Failure(message: "ARGB appearance comparison is incomplete")
                 }
-                try require(transparent.inkPixels == 0, "Zero-alpha red became visible in the PDF")
+                let diagnostics = "transparent={\(transparent.diagnostics)} opaque={\(opaque.diagnostics)} half={\(half.diagnostics)} default={\(plain.diagnostics)}"
+                print("UDF_ALPHA_DIAGNOSTIC \(diagnostics)")
+                try require(transparent.inkPixels == 0, "Zero-alpha red became visible in the PDF: \(diagnostics)")
                 try require(opaque.redPixels > 25 && opaque.minimumRedGreen < 0.15,
-                            "Opaque signed ARGB red did not produce strong red glyph pixels")
+                            "Opaque signed ARGB red did not produce strong red glyph pixels: \(diagnostics)")
                 try require(half.redPixels > 25 && half.minimumRedGreen > 0.3 && half.minimumRedGreen < 0.8,
-                            "Half-alpha red was not visibly blended over white paper")
+                            "Half-alpha red was not visibly blended over white paper: \(diagnostics)")
                 try require(half.minimumRedGreen > opaque.minimumRedGreen + 0.2,
-                            "Half-alpha red was rendered as fully opaque red")
-                try require(plain.blackPixels > 25, "Absent foreground color did not retain opaque black text")
+                            "Half-alpha red was rendered as fully opaque red: \(diagnostics)")
+                try require(plain.blackPixels > 25, "Absent foreground color did not retain opaque black text: \(diagnostics)")
             }
 
             check("a fitting single line can retain mixed 12 and 18 point spans") {
@@ -530,6 +532,9 @@ enum NativeUDFSelfTest {
     private struct AlphaAppearance {
         let inkPixels, redPixels, blackPixels: Int
         let minimumRedGreen: CGFloat
+        var diagnostics: String {
+            "ink=\(inkPixels),red=\(redPixels),black=\(blackPixels),minRedGreen=\(minimumRedGreen)"
+        }
     }
 
     private static func alphaAppearance(_ page: PDFPage) throws -> AlphaAppearance {

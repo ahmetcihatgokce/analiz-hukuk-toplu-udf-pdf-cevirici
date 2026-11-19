@@ -66,7 +66,7 @@ jobs:
           PY
       - name: Prepare official UYAP comparison engine for tests only
         id: oracle
-        if: always() && steps.test-build.outcome == 'success'
+        if: success()
         env:
           UYAP_PROBE_KEEP_RUNTIME: '1'
         run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/store-official-baseline"
