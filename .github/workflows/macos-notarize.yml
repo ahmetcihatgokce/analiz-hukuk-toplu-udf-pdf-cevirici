@@ -1,0 +1,117 @@
+name: Sign and notarize macOS distribution
+
+# Manual only. This workflow must exist on the default branch to be dispatched.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed source commit (must match APPROVED_SOURCE_SHA below)
+        required: true
+        type: string
+        default: 98c996ec72181c0c2aa7704556faf21367386cd8
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-notarization-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sign-and-notarize:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/macos-port')
+    name: Notarize ${{ matrix.runner }}
+    environment: mac-distribution
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    env:
+      # Update this AND the dispatch default only after reviewing and testing a new commit.
+      APPROVED_SOURCE_SHA: 98c996ec72181c0c2aa7704556faf21367386cd8
+      REQUESTED_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Require the reviewed immutable source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REQUESTED_SOURCE_SHA" == "$APPROVED_SOURCE_SHA" ]] || {
+            echo 'The requested source must match the reviewed APPROVED_SOURCE_SHA.' >&2
+            exit 1
+          }
+      - name: Check out reviewed distribution tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: ci-tools
+          persist-credentials: false
+      - name: Check out reviewed application source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - name: Validate source and script
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git -C source rev-parse HEAD)" == "$APPROVED_SOURCE_SHA" ]]
+          bash -n ci-tools/macos/distribution/sign-and-notarize.sh
+      - name: Build native app
+        run: bash source/macos/build.sh "$RUNNER_TEMP/package"
+      - name: Prepare official UYAP and synthetic fixture
+        env:
+          UYAP_PROBE_KEEP_RUNTIME: '1'
+        run: bash source/macos/ci/probe-macos.sh "$RUNNER_TEMP/uyap-report"
+      - name: Test app before importing credentials
+        env:
+          UYAP_FIXTURE: ${{ runner.temp }}/uyap-report/sentetik-ornek.udf
+          MAC_RAR_FIXTURE: ${{ github.workspace }}/source/macos/Fixtures/integration.rar
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          binary = root / 'package/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf'
+          report = root / 'mac-pre-sign-tests'
+          report.mkdir()
+          subprocess.run([str(binary), '--self-test', str(report)], check=True, timeout=600)
+          subprocess.run([str(binary), '--ui-smoke', str(report / 'application-window.png')], check=True, timeout=60)
+          PY
+      - name: Sign, test and send to Apple notarization
+        env:
+          MAC_CERTIFICATE_P12_BASE64: ${{ secrets.MAC_CERTIFICATE_P12_BASE64 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          MAC_SOURCE_SHA: ${{ env.APPROVED_SOURCE_SHA }}
+          UYAP_FIXTURE: ${{ runner.temp }}/uyap-report/sentetik-ornek.udf
+          MAC_RAR_FIXTURE: ${{ github.workspace }}/source/macos/Fixtures/integration.rar
+        run: |
+          bash ci-tools/macos/distribution/sign-and-notarize.sh \
+            "$RUNNER_TEMP/package/Toplu UDF PDF Cevirici.app" \
+            "$RUNNER_TEMP/notarized-output"
+      - name: Upload only the Apple-accepted distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Toplu-UDF-PDF-Mac-1.04-notarized-${{ matrix.runner }}
+          path: ${{ runner.temp }}/notarized-output
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove any leftover signing credentials
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for directory in "$RUNNER_TEMP"/mac-signing.*; do
+            [[ -d "$directory" && ! -L "$directory" ]] || continue
+            security delete-keychain "$directory/signing.keychain-db" >/dev/null 2>&1 || true
+            rm -rf -- "$directory"
+          done

@@ -1,0 +1,34 @@
+name: Check macOS signing tools
+on:
+  push:
+    branches: [main, macos-port]
+    paths:
+      - 'macos/distribution/**'
+      - '.github/workflows/macos-notarize.yml'
+      - '.github/workflows/macos-signing-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate Bash and embedded Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n macos/distribution/sign-and-notarize.sh
+          python3 - <<'PY'
+          import pathlib, re
+          script = pathlib.Path('macos/distribution/sign-and-notarize.sh').read_text()
+          blocks = re.findall(r"<<'PY'\n(.*?)\nPY", script, flags=re.S)
+          if not blocks:
+              raise SystemExit('No embedded Python blocks found')
+          for i, block in enumerate(blocks):
+              compile(block, f'sign-and-notarize.sh:python-{i + 1}', 'exec')
+          print(f'Bash syntax and {len(blocks)} embedded Python blocks passed')
+          PY
