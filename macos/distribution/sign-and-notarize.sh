@@ -58,6 +58,10 @@ security create-keychain -p "$keychain_password" "$keychain" >/dev/null
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$keychain_password" "$keychain"
 security import "$p12" -P "$MAC_CERTIFICATE_PASSWORD" -k "$keychain" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+# Windows-exported P12 files may omit the public Developer ID G2 intermediate.
+curl --fail --location --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 120 --retry 2 \
+    'https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer' -o "$private_root/DeveloperIDG2CA.cer"
+security import "$private_root/DeveloperIDG2CA.cer" -k "$keychain" >/dev/null
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
 security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
 rm -f -- "$p12"
