@@ -270,7 +270,7 @@ jobs:
           lipo -create "$arm/Contents/MacOS/UdfPdf" "$intel/Contents/MacOS/UdfPdf" -output "$app/Contents/MacOS/UdfPdf"
           codesign --force --options runtime --generate-entitlement-der \
             --entitlements macos-store/Store.entitlements --sign - "$app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/UdfPdf"
+          lipo "$app/Contents/MacOS/UdfPdf" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
           codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-universal-entitlements.plist" 2>/dev/null
           python3 - <<'PY'

@@ -24,7 +24,7 @@ script_root="$(cd "$(dirname "$0")" && pwd)"
 entitlements_source="$script_root/../Store.entitlements"
 [[ -f "$entitlements_source" ]] || fail 'Store.entitlements is required.'
 codesign --verify --deep --strict "$app"
-lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/UdfPdf"
+lipo "$app/Contents/MacOS/UdfPdf" -verify_arch arm64 x86_64
 if otool -L "$app/Contents/MacOS/UdfPdf" | grep -qE '/(opt/homebrew|usr/local)/'; then
     fail 'The Store app has a non-system runtime dependency.'
 fi
