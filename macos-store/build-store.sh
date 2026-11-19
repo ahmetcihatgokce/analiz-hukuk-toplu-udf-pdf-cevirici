@@ -65,7 +65,9 @@ swiftc -parse-as-library -swift-version 5 -sdk "$sdk" -target "$architecture-app
 if otool -L "$app/Contents/MacOS/UdfPdf" | grep -qE '/(opt/homebrew|usr/local)/'; then
     echo 'Unexpected non-system runtime dependency in the Store candidate.' >&2; exit 1
 fi
-# Copy the icon only. No Java source, bytecode, JRE, UYAP or test fixture is bundled.
+# Bundle the privacy declaration and icon, never Java/UYAP code or test fixtures.
+plutil -lint "$root/Resources/PrivacyInfo.xcprivacy" >/dev/null
+cp "$root/Resources/PrivacyInfo.xcprivacy" "$app/Contents/Resources/PrivacyInfo.xcprivacy"
 iconset="$output/AppIcon.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do

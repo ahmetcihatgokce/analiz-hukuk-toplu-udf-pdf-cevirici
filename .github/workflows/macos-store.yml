@@ -63,6 +63,21 @@ jobs:
           subprocess.run([str(app), '--store-self-test', os.environ['STORE_TEST_ROOT']], check=True, timeout=600)
           subprocess.run([str(app), '--ui-smoke', os.environ['STORE_TEST_ROOT'] + '/application-window.png'], check=True, timeout=90)
           PY
+      - name: Prepare official UYAP comparison engine for tests only
+        env:
+          UYAP_PROBE_KEEP_RUNTIME: '1'
+        run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/store-official-baseline"
+      - name: Compare advanced native UDF output against official exporter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 macos-store/ci/native-fixtures.py "$STORE_TEST_ROOT/compatibility-fixtures"
+          python3 macos-store/ci/compare-official.py \
+            --fixtures "$STORE_TEST_ROOT/compatibility-fixtures" \
+            --native "$RUNNER_TEMP/store-tests/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf" \
+            --native-work-root "$STORE_TEST_ROOT/official-native" \
+            --bridge-source macos/Resources/UyapBridge.java \
+            --output "$RUNNER_TEMP/official-comparison"
       - name: Build release candidate without test entry points
         run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-candidate" --no-zip
       - name: Verify release contents and sandbox
@@ -91,6 +106,8 @@ jobs:
           name: store-sandbox-report-${{ matrix.runner }}
           path: |
             ~/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests
+            ${{ runner.temp }}/store-official-baseline
+            ${{ runner.temp }}/official-comparison
           if-no-files-found: warn
           retention-days: 14
       - name: Retain tested Store candidate

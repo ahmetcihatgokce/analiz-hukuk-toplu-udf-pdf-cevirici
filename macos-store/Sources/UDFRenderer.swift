@@ -148,6 +148,7 @@ enum UDFRenderer {
         return layout
     }
 
+    @MainActor
     private final class Layout {
         let storage: NSTextStorage
         let manager: NSLayoutManager
@@ -222,6 +223,7 @@ enum UDFRenderer {
         let y: CGFloat
     }
 
+    @MainActor
     private final class PagePlanner {
         let size: CGSize
         var pages: [[Fragment]] = []
@@ -303,6 +305,7 @@ enum UDFRenderer {
         }
     }
 
+    @MainActor
     private final class AttributedBuilder {
         let availableWidth: CGFloat
         let pageNumber: Int?
@@ -416,21 +419,34 @@ enum UDFRenderer {
                   occupied.allSatisfy({ $0.count == columns }) else {
                 throw ConversionFailure("UDF tablosunun sütun yerleşimi tamamlanamıyor.")
             }
-            let tableWidth = CGFloat(source.width ?? Double(width))
+            let explicitWidths: [CGFloat]?
+            if !source.columnWidths.isEmpty {
+                guard source.columnWidths.count == columns else {
+                    throw ConversionFailure("UDF tablo sütun ölçülerinin sayısı uyuşmuyor.")
+                }
+                explicitWidths = source.columnWidths.map { CGFloat($0) }
+            } else if let first = source.rows.first,
+                      first.cells.count == columns,
+                      first.cells.allSatisfy({ $0.columnSpan == 1 && $0.width != nil }),
+                      positions.first == Array(0..<columns) {
+                explicitWidths = first.cells.compactMap { $0.width.map { CGFloat($0) } }
+            } else {
+                explicitWidths = nil
+            }
+            let inferredWidth = explicitWidths?.reduce(0, +) ?? width
+            let tableWidth = source.width.map { CGFloat($0) } ?? inferredWidth
             guard tableWidth > 0, tableWidth <= width + 1 else {
                 throw ConversionFailure("UDF tablosu sayfa genişliğine sığmıyor.")
             }
             let widths: [CGFloat]
-            if source.columnWidths.isEmpty {
-                widths = Array(repeating: tableWidth / CGFloat(columns), count: columns)
+            if let supplied = explicitWidths {
+                guard supplied.allSatisfy({ $0.isFinite && $0 > 0 }),
+                      abs(supplied.reduce(0, +) - tableWidth) <= 1 else {
+                    throw ConversionFailure("UDF tablo ve sütun genişlikleri birbiriyle uyuşmuyor.")
+                }
+                widths = supplied
             } else {
-                guard source.columnWidths.count == columns else {
-                    throw ConversionFailure("UDF tablo sütun ölçülerinin sayısı uyuşmuyor.")
-                }
-                widths = source.columnWidths.map { CGFloat($0) }
-                guard widths.allSatisfy({ $0.isFinite && $0 > 0 }), widths.reduce(0, +) <= tableWidth + 2 else {
-                    throw ConversionFailure("UDF tablo sütun ölçüleri geçersiz.")
-                }
+                widths = Array(repeating: tableWidth / CGFloat(columns), count: columns)
             }
             let table = NSTextTable()
             table.numberOfColumns = columns
@@ -448,13 +464,19 @@ enum UDFRenderer {
                     let tableBlock = NSTextTableBlock(table: table, startingRow: rowIndex,
                                                      rowSpan: cell.rowSpan, startingColumn: column,
                                                      columnSpan: cell.columnSpan)
-                    let cellWidth = CGFloat(cell.width ?? Double(widths[column..<(column + cell.columnSpan)].reduce(0, +)))
+                    let cellWidth = widths[column..<(column + cell.columnSpan)].reduce(0, +)
                     guard cellWidth > 4, cellWidth <= tableWidth + 1 else {
                         throw ConversionFailure("UDF tablo hücresinin genişliği geçersiz.")
                     }
-                    tableBlock.setContentWidth(max(1, cellWidth - 4), type: .absoluteValueType)
+                    if let declared = cell.width, abs(CGFloat(declared) - cellWidth) > 1 {
+                        throw ConversionFailure("UDF hücre ve sütun genişlikleri birbiriyle uyuşmuyor.")
+                    }
+                    let borderWidth: CGFloat
+                    if case .grid = source.border { borderWidth = 1 } else { borderWidth = 0 }
+                    let contentWidth = max(1, cellWidth - 4 - borderWidth)
+                    tableBlock.setContentWidth(contentWidth, type: .absoluteValueType)
                     tableBlock.setWidth(2, type: .absoluteValueType, for: .padding)
-                    tableBlock.verticalAlignment = .top
+                    tableBlock.verticalAlignment = .topAlignment
                     if case .grid = source.border {
                         tableBlock.setWidth(0.5, type: .absoluteValueType, for: .border)
                         tableBlock.setBorderColor(.black)
@@ -467,7 +489,7 @@ enum UDFRenderer {
                         result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: style]))
                     } else {
                         for block in cell.blocks {
-                            try append(block, to: result, parents: nested, width: max(1, cellWidth - 4), depth: depth + 1)
+                            try append(block, to: result, parents: nested, width: contentWidth, depth: depth + 1)
                         }
                     }
                 }
