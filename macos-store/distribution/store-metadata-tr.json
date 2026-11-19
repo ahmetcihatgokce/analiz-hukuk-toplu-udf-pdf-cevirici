@@ -1,0 +1,18 @@
+{
+  "status": "draft-not-submitted",
+  "platform": "MAC_OS",
+  "bundleId": "org.analizhukuk.udfpdf.mac",
+  "version": "1.0.4",
+  "build": "2",
+  "name": "Analiz Hukuk UDF PDF",
+  "subtitle": "Toplu dönüşüm ve PDF araçları",
+  "primaryLocale": "tr-TR",
+  "category": "PRODUCTIVITY",
+  "price": "free",
+  "description": "Avukatlar ve hukuk büroları için belge hazırlama işlerini kolaylaştıran masaüstü araç. Dosya veya klasör seçerek desteklenen UDF, HTML, TIFF, JPG, JPEG, PNG, BMP ve GIF belgelerini topluca PDF’ye dönüştürün. ZIP, RAR ve ZIP tabanlı EYP arşivlerindeki desteklenen belgeleri işleyin; isterseniz yalnızca hazır PDF’leri ayıklayın.\n\nPDF dosyalarını istediğiniz sıraya göre birleştirin. Seçtiğiniz sayfaları çıkarın veya her sayfayı ayrı PDF olarak kaydedin. Aynı adla çıktı oluştururken mevcut belgelerin üzerine yazılmaz.\n\nBelgeler bilgisayarınızda işlenir. Dönüştürme için üyelik veya belge yükleme gerekmez. Belge içerikleri sunucuya gönderilmez.\n\nUDF sürüm ve biçim farklılıkları desteklenen özellikleri etkileyebilir. Tanınmayan bir belge özelliği eksik içerikli PDF olarak sunulmaz; işlem hata ile bildirilir. Bu uygulama resmî UYAP uygulaması değildir. Dönüşümden sonra belge içeriğini ve sayfa düzenini kontrol edin.",
+  "keywords": "udf,pdf,toplu,dönüştürücü,birleştir,ayır,tiff,arşiv,belge,hukuk",
+  "supportUrl": "https://analizhukukburosu.org/uygulamalar/toplu-udf-pdf",
+  "privacyPolicyUrl": "https://analizhukukburosu.org/uygulamalar/toplu-udf-pdf/gizlilik",
+  "dataCollection": "DATA_NOT_COLLECTED",
+  "reviewNotes": "Draft only. No submission has been made. Native Swift/AppKit UDF ZIP/XML conversion; no external UYAP/Java requirement or runtime downloads. User-selected file/folder access in App Sandbox; no network client entitlement, accounts, analytics or in-app purchases. Synthetic sample documents and validation reports must be attached after final fidelity tests pass. App review contact must be confirmed from the existing account rather than invented."
+}

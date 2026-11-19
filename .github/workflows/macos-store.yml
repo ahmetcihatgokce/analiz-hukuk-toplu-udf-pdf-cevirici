@@ -1,0 +1,102 @@
+name: Mac App Store candidate tests
+on:
+  push:
+    branches: [macos-store]
+    paths:
+      - 'macos-store/**'
+      - '.github/workflows/macos-store.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-store-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-sandbox:
+    name: Native sandbox ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          persist-credentials: false
+      - name: Check Store packaging scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n macos-store/build-store.sh
+          bash -n macos-store/distribution/package-store.sh
+          python3 - <<'PY'
+          import pathlib, re
+          for name in ['build-store.sh', 'distribution/package-store.sh']:
+              source = pathlib.Path('macos-store', name).read_text()
+              for i, block in enumerate(re.findall(r"<<'PY'\n(.*?)\nPY", source, re.S)):
+                  compile(block, name + ':python-' + str(i), 'exec')
+          PY
+      - name: Build sandboxed test app
+        env:
+          MAC_STORE_TESTING: '1'
+        run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-tests" --no-zip
+      - name: Prepare synthetic files inside app container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="$HOME/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests"
+          mkdir -p "$container/fixtures"
+          cp macos-store/Fixtures/official-synthetic.udf "$container/fixtures/official.udf"
+          cp macos-store/Fixtures/integration.rar "$container/fixtures/integration.rar"
+          printf '%s\n' 'Synthetic sandbox access test. This is not a real client document.' > "$RUNNER_TEMP/unselected-private-document.txt"
+          printf 'STORE_TEST_ROOT=%s\n' "$container" >> "$GITHUB_ENV"
+          printf 'UYAP_FIXTURE=%s\n' "$container/fixtures/official.udf" >> "$GITHUB_ENV"
+          printf 'MAC_RAR_FIXTURE=%s\n' "$container/fixtures/integration.rar" >> "$GITHUB_ENV"
+          printf 'STORE_SANDBOX_DENIED_PATH=%s\n' "$RUNNER_TEMP/unselected-private-document.txt" >> "$GITHUB_ENV"
+      - name: Test native UDF and PDF tools with sandbox enabled
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-tests/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf'
+          subprocess.run([str(app), '--store-self-test', os.environ['STORE_TEST_ROOT']], check=True, timeout=600)
+          subprocess.run([str(app), '--ui-smoke', os.environ['STORE_TEST_ROOT'] + '/application-window.png'], check=True, timeout=90)
+          PY
+      - name: Build release candidate without test entry points
+        run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-candidate" --no-zip
+      - name: Verify release contents and sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/store-candidate/Toplu UDF PDF Cevirici.app"
+          codesign --verify --deep --strict "$app"
+          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/release-entitlements.plist" 2>/dev/null
+          python3 - "$app" "$RUNNER_TEMP/release-entitlements.plist" <<'PY'
+          import pathlib, plistlib, sys
+          app = pathlib.Path(sys.argv[1])
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleIdentifier'] == 'org.analizhukuk.udfpdf.mac'
+          assert info['AHStoreTestingBuild'] is False
+          entitlements = plistlib.loads(pathlib.Path(sys.argv[2]).read_bytes())
+          assert entitlements == {'com.apple.security.app-sandbox': True, 'com.apple.security.files.user-selected.read-write': True}
+          assert not any(p.suffix.lower() in {'.jar', '.java', '.class', '.dylib'} for p in app.rglob('*'))
+          print('PASS release sandbox, no Java and no test entry points')
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/Store-candidate-$(uname -m).zip"
+      - name: Retain synthetic reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: store-sandbox-report-${{ matrix.runner }}
+          path: |
+            ~/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Retain tested Store candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: store-candidate-${{ matrix.runner }}
+          path: ${{ runner.temp }}/Store-candidate-*.zip
+          if-no-files-found: error
+          retention-days: 14
