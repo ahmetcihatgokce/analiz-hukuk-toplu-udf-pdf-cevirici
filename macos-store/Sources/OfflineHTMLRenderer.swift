@@ -30,6 +30,11 @@ enum OfflineHTMLRenderer {
         }
         html = replacing("<!DOCTYPE[^>]*>|<\\?xml[^>]*\\?>", in: html, with: "")
         html = replacing("(charset\\s*=\\s*[\"']?)[a-zA-Z0-9_-]+", in: html, with: "$1utf-8")
+        // Foundation's legacy HTML tidy parser can default to Latin-1 even
+        // when its input bytes were explicitly made from a UTF-8 Swift String.
+        // A traditional HTTP-equiv declaration is understood by that parser,
+        // including when the source had no head or only an HTML5 charset tag.
+        html = declaringUTF8(html)
         // An XML processing instruction would force ordinary HTML (including
         // void elements such as <meta>) into the strict XML parsing path.
         html = closeVoidElements(html)
@@ -49,7 +54,10 @@ enum OfflineHTMLRenderer {
         var resourceBytes = 0
         try sanitize(root, base: input.deletingLastPathComponent(), depth: 0,
                      count: &count, pixels: &imagePixels, resourceBytes: &resourceBytes)
-        let safe = document.xmlData(options: [])
+        document.characterEncoding = "UTF-8"
+        // All source meta tags were removed by the sanitizer. Supply only our
+        // own inert encoding declaration to the separate rich-text importer.
+        let safe = Data(declaringUTF8(document.xmlString(options: [])).utf8)
         guard safe.count <= 64 * 1024 * 1024 else {
             throw ConversionFailure("HTML belgesinin kaynakları boyut sınırını aşıyor.")
         }
@@ -60,6 +68,7 @@ enum OfflineHTMLRenderer {
             attributed = try NSAttributedString(data: safe, options: [
                 .documentType: NSAttributedString.DocumentType.html,
                 .characterEncoding: String.Encoding.utf8.rawValue,
+                .textEncodingName: "utf-8",
                 .timeout: 8.0
             ], documentAttributes: nil)
         } catch {
@@ -129,9 +138,10 @@ enum OfflineHTMLRenderer {
 #if STORE_TESTING
         let extracted = PDFDocument(data: pdf)?.string ?? ""
         let fixtureTitle = "Vekâlet pulu makbuzu"
+        let parsedTitle = root.stringValue?.contains(fixtureTitle) == true
         let importedTitle = attributed.string.contains(fixtureTitle)
         let pdfTitle = extracted.contains(fixtureTitle)
-        print("HTML_LAYOUT_DIAG importedCharacters=\(attributed.length) importedFixtureTitle=\(importedTitle) pdfCharacters=\(extracted.utf16.count) pdfFixtureTitle=\(pdfTitle) canvasHeight=\(mediaBox.height) usedHeight=\(bounds.maxY)")
+        print("HTML_LAYOUT_DIAG parsedFixtureTitle=\(parsedTitle) importedCharacters=\(attributed.length) importedFixtureTitle=\(importedTitle) pdfCharacters=\(extracted.utf16.count) pdfFixtureTitle=\(pdfTitle) canvasHeight=\(mediaBox.height) usedHeight=\(bounds.maxY)")
 #endif
         return pdf
     }
@@ -316,6 +326,25 @@ enum OfflineHTMLRenderer {
             index += 1
         }
         return String(decoding: result, as: UTF8.self)
+    }
+
+    private static func declaringUTF8(_ html: String) -> String {
+        let declaration = "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>"
+        if let expression = try? NSRegularExpression(pattern: "<head(?:\\s[^>]*)?>", options: [.caseInsensitive]),
+           let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+           let range = Range(match.range, in: html) {
+            var result = html
+            result.insert(contentsOf: declaration, at: range.upperBound)
+            return result
+        }
+        if let expression = try? NSRegularExpression(pattern: "<html(?:\\s[^>]*)?>", options: [.caseInsensitive]),
+           let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+           let range = Range(match.range, in: html) {
+            var result = html
+            result.insert(contentsOf: "<head>" + declaration + "</head>", at: range.upperBound)
+            return result
+        }
+        return declaration + html
     }
 
     private static func matches(_ pattern: String, in text: String) -> Bool {

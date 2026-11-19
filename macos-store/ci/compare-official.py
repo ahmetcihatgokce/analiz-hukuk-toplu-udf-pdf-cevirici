@@ -315,6 +315,7 @@ def main() -> int:
         bridge_compile = invoke(["javac", "--release", "8", "-encoding", "UTF-8", "-d", str(classes), str(args.bridge_source)], timeout=90)
         write_log(args.output / "oracle-compile.log", bridge_compile)
         if bridge_compile.returncode:
+            print("ORACLE_COMPILE_ERROR " + json.dumps(bridge_compile.stdout[-5000:]), flush=True)
             raise RuntimeError("CI-only official bridge did not compile; see oracle-compile.log")
         metrics_source = scratch / "PDFMetrics.swift"
         metrics_source.write_text(METRICS_SWIFT, encoding="utf-8")
@@ -322,6 +323,7 @@ def main() -> int:
         metrics_compile = invoke(["swiftc", "-O", "-framework", "AppKit", "-framework", "PDFKit", str(metrics_source), "-o", str(metrics_binary)], timeout=120)
         write_log(args.output / "metrics-compile.log", metrics_compile)
         if metrics_compile.returncode:
+            print("METRICS_COMPILE_ERROR " + json.dumps(metrics_compile.stdout[-5000:]), flush=True)
             raise RuntimeError("PDF metrics helper did not compile; see metrics-compile.log")
         for item in fixtures:
             name = item["file"]
@@ -390,6 +392,9 @@ def main() -> int:
                 metric_result = invoke([str(metrics_binary), str(pdf), str(phrases)], timeout=90)
                 write_log(case / (label + "-metrics.log"), metric_result)
                 if metric_result.returncode:
+                    print("METRICS_ERROR " + json.dumps({"file": name, "renderer": label,
+                                                        "logTail": metric_result.stdout[-3000:]},
+                                                       ensure_ascii=False, separators=(",", ":")), flush=True)
                     raise RuntimeError("PDF metrics failed for " + name + "/" + label)
                 metrics = json.loads(metric_result.stdout)
                 (case / (label + "-metrics.json")).write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

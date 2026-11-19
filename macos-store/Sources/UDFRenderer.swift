@@ -193,7 +193,10 @@ enum UDFRenderer {
         init(text: NSAttributedString, size: CGSize) {
             let storage = NSTextStorage(attributedString: text)
             let manager = NSLayoutManager()
-            manager.usesFontLeading = true
+            // Ordinary paragraph heights already include native font leading
+            // before rounding to Swing's line advance. Adding TextKit leading
+            // again causes a cumulative 0.5098pt drift for Times New Roman 12.
+            manager.usesFontLeading = false
             manager.allowsNonContiguousLayout = false
             let container = NSTextContainer(containerSize: size)
             container.lineFragmentPadding = 0
@@ -377,7 +380,9 @@ enum UDFRenderer {
             // lines, tables, ligatures and attachments retain their glyph mapping.
             let storage = NSTextStorage(attributedString: text)
             let manager = NSLayoutManager()
-            manager.usesFontLeading = true
+            // Font leading is included once by paragraphAttributes, not added
+            // again to every explicit line fragment by the layout manager.
+            manager.usesFontLeading = false
             manager.allowsNonContiguousLayout = false
             storage.addLayoutManager(manager)
             var previousEnd = 0
