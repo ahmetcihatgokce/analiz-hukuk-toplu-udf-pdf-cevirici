@@ -19,6 +19,8 @@ struct UDFCharacterStyle {
     let family: String
     let size: Double
     let bold, italic, underline, strikethrough: Bool
+    // Compatibility property names: these values preserve the complete Java
+    // Color.getRGB() ARGB bit pattern, including transparent/partial alpha.
     let foregroundRGB, backgroundRGB: UInt32?
     /// 0 = normal, 1 = superscript, -1 = subscript.
     let superscript: Int
@@ -53,6 +55,7 @@ struct UDFCell {
     let blocks: [UDFBlock]
     let columnSpan, rowSpan: Int
     let width: Double?
+    /// Complete ARGB bits despite the compatibility property name.
     let backgroundRGB: UInt32?
 }
 
@@ -751,8 +754,8 @@ private final class UDFModelBuilder {
     }
     private func color(_ raw: String?) throws -> UInt32? {
         guard let raw = raw else { return nil }
-        if raw.hasPrefix("#"), raw.count == 7, let value = UInt32(raw.dropFirst(), radix: 16) { return value }
-        if let value = Int64(raw), value >= Int64(Int32.min), value <= Int64(UInt32.max) { return UInt32(truncatingIfNeeded: value) & 0xFFFFFF }
+        if raw.hasPrefix("#"), raw.count == 7, let value = UInt32(raw.dropFirst(), radix: 16) { return 0xFF000000 | value }
+        if let value = Int64(raw), value >= Int64(Int32.min), value <= Int64(UInt32.max) { return UInt32(truncatingIfNeeded: value) }
         throw UDFParseError("UDF renk değeri geçersiz.")
     }
 }

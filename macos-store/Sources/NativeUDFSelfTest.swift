@@ -121,6 +121,48 @@ enum NativeUDFSelfTest {
                 try require(traits.contains(.boldFontMask), "Bold span lost its bold face")
             }
 
+            check("Java ARGB alpha is preserved in parsed styles and visible PDF pixels") {
+                let cases: [(String, String?, UInt32?)] = [
+                    ("transparent", "16711680", 0x00FF0000),
+                    ("opaque", "-65536", 0xFFFF0000),
+                    ("half", "-2130771968", 0x80FF0000),
+                    ("default", nil, nil),
+                ]
+                var appearances: [String: AlphaAppearance] = [:]
+                for (name, value, expectedBits) in cases {
+                    var fixture = Fixture()
+                    let color = value.map { " foreground=\"\($0)\"" } ?? ""
+                    let body = fixture.paragraph("ALPHA_TEST\n", style: "size=\"24\"" + color)
+                    let parsed = try UDFDocument.parse(xml: fixture.xml(body: body))
+                    guard let block = parsed.body.first, case .paragraph(let paragraph) = block,
+                          let run = paragraph.runs.first else {
+                        throw Failure(message: "ARGB fixture did not produce a text run")
+                    }
+                    if let expectedBits = expectedBits {
+                        try require(run.style.foregroundRGB == expectedBits, "Java ARGB bits were changed for \(name)")
+                    }
+                    let output = root.appendingPathComponent("alpha-\(name).pdf")
+                    try UDFRenderer.render(parsed, to: output)
+                    let pdf = try openPDF(output)
+                    guard pdf.pageCount == 1, let page = pdf.page(at: 0) else {
+                        throw Failure(message: "ARGB fixture did not create one page")
+                    }
+                    appearances[name] = try alphaAppearance(page)
+                }
+                guard let transparent = appearances["transparent"], let opaque = appearances["opaque"],
+                      let half = appearances["half"], let plain = appearances["default"] else {
+                    throw Failure(message: "ARGB appearance comparison is incomplete")
+                }
+                try require(transparent.inkPixels == 0, "Zero-alpha red became visible in the PDF")
+                try require(opaque.redPixels > 25 && opaque.minimumRedGreen < 0.15,
+                            "Opaque signed ARGB red did not produce strong red glyph pixels")
+                try require(half.redPixels > 25 && half.minimumRedGreen > 0.3 && half.minimumRedGreen < 0.8,
+                            "Half-alpha red was not visibly blended over white paper")
+                try require(half.minimumRedGreen > opaque.minimumRedGreen + 0.2,
+                            "Half-alpha red was rendered as fully opaque red")
+                try require(plain.blackPixels > 25, "Absent foreground color did not retain opaque black text")
+            }
+
             check("a fitting single line can retain mixed 12 and 18 point spans") {
                 var fixture = Fixture()
                 let small = "SMALL_SENTINEL "
@@ -483,6 +525,41 @@ enum NativeUDFSelfTest {
             }
         }
         return count
+    }
+
+    private struct AlphaAppearance {
+        let inkPixels, redPixels, blackPixels: Int
+        let minimumRedGreen: CGFloat
+    }
+
+    private static func alphaAppearance(_ page: PDFPage) throws -> AlphaAppearance {
+        let image = page.thumbnail(of: NSSize(width: 400, height: 570), for: .mediaBox)
+        guard let encoded = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: encoded),
+              bitmap.pixelsWide > 4, bitmap.pixelsHigh > 4 else {
+            throw Failure(message: "ARGB fixture cannot be rasterized")
+        }
+        var inkPixels = 0, redPixels = 0, blackPixels = 0
+        var minimumRedGreen = CGFloat.infinity
+        // Exclude only the external thumbnail frame. Fixture text is well within
+        // the declared margins. Composite any transparent bitmap pixels over
+        // white paper before comparing their visible appearance.
+        for y in 2..<(bitmap.pixelsHigh - 2) {
+            for x in 2..<(bitmap.pixelsWide - 2) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                let alpha = color.alphaComponent
+                let red = 1 - alpha + alpha * color.redComponent
+                let green = 1 - alpha + alpha * color.greenComponent
+                let blue = 1 - alpha + alpha * color.blueComponent
+                if min(red, green, blue) < 0.95 { inkPixels += 1 }
+                if max(red, green, blue) < 0.2 { blackPixels += 1 }
+                if red - green > 0.1 && red - blue > 0.1 {
+                    redPixels += 1
+                    minimumRedGreen = min(minimumRedGreen, green)
+                }
+            }
+        }
+        return AlphaAppearance(inkPixels: inkPixels, redPixels: redPixels, blackPixels: blackPixels,
+                               minimumRedGreen: minimumRedGreen)
     }
 
     private static func requireTableGrid(page: PDFPage, upperLeft: PDFSelection,

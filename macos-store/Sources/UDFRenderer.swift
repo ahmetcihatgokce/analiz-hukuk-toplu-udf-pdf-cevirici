@@ -754,9 +754,13 @@ enum UDFRenderer {
         }
 
         private func rgb(_ value: UInt32) -> NSColor {
+            // The model's historical *RGB names contain Java's full ARGB
+            // color value. Preserve opacity, including genuinely invisible
+            // text; #RRGGBB parsing supplies an opaque alpha byte upstream.
             NSColor(srgbRed: CGFloat((value >> 16) & 255) / 255,
                     green: CGFloat((value >> 8) & 255) / 255,
-                    blue: CGFloat(value & 255) / 255, alpha: 1)
+                    blue: CGFloat(value & 255) / 255,
+                    alpha: CGFloat((value >> 24) & 255) / 255)
         }
     }
 }
