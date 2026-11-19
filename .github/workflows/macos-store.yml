@@ -38,6 +38,7 @@ jobs:
                   compile(block, name + ':python-' + str(i), 'exec')
           PY
       - name: Build sandboxed test app
+        id: test-build
         env:
           MAC_STORE_TESTING: '1'
         run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-tests" --no-zip
@@ -64,10 +65,13 @@ jobs:
           subprocess.run([str(app), '--ui-smoke', os.environ['STORE_TEST_ROOT'] + '/application-window.png'], check=True, timeout=90)
           PY
       - name: Prepare official UYAP comparison engine for tests only
+        id: oracle
+        if: always() && steps.test-build.outcome == 'success'
         env:
           UYAP_PROBE_KEEP_RUNTIME: '1'
         run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/store-official-baseline"
       - name: Compare advanced native UDF output against official exporter
+        if: always() && steps.oracle.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
