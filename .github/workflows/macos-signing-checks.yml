@@ -5,6 +5,7 @@ on:
     paths:
       - 'macos/distribution/**'
       - '.github/workflows/macos-notarize.yml'
+      - '.github/workflows/macos-notary-resume.yml'
       - '.github/workflows/macos-signing-checks.yml'
   workflow_dispatch:
 permissions:
@@ -22,13 +23,19 @@ jobs:
         run: |
           set -euo pipefail
           bash -n macos/distribution/sign-and-notarize.sh
+          if [ -f macos/distribution/resume-notary.sh ]; then
+            bash -n macos/distribution/resume-notary.sh
+          fi
+          node --check macos/distribution/notary-package.mjs
+          node macos/distribution/test-notary-package.mjs
           python3 - <<'PY'
           import pathlib, re
-          script = pathlib.Path('macos/distribution/sign-and-notarize.sh').read_text()
-          blocks = re.findall(r"<<'PY'\n(.*?)\nPY", script, flags=re.S)
-          if not blocks:
-              raise SystemExit('No embedded Python blocks found')
-          for i, block in enumerate(blocks):
-              compile(block, f'sign-and-notarize.sh:python-{i + 1}', 'exec')
-          print(f'Bash syntax and {len(blocks)} embedded Python blocks passed')
+          for name in ['sign-and-notarize.sh', 'resume-notary.sh']:
+              script = pathlib.Path('macos/distribution', name).read_text()
+              blocks = re.findall(r"<<'PY'\n(.*?)\nPY", script, flags=re.S)
+              if not blocks:
+                  raise SystemExit('No embedded Python blocks found: ' + name)
+              for i, block in enumerate(blocks):
+                  compile(block, f'{name}:python-{i + 1}', 'exec')
+              print(f'{name}: Bash syntax and {len(blocks)} embedded Python blocks passed')
           PY

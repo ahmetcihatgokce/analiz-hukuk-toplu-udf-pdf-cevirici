@@ -83,6 +83,7 @@ jobs:
           subprocess.run([str(binary), '--ui-smoke', str(report / 'application-window.png')], check=True, timeout=60)
           PY
       - name: Sign, test and send to Apple notarization
+        id: notarization
         env:
           MAC_CERTIFICATE_P12_BASE64: ${{ secrets.MAC_CERTIFICATE_P12_BASE64 }}
           MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
@@ -99,10 +100,19 @@ jobs:
             "$RUNNER_TEMP/package/Toplu UDF PDF Cevirici.app" \
             "$RUNNER_TEMP/notarized-output"
       - name: Upload only the Apple-accepted distribution
+        if: steps.notarization.outputs.state == 'accepted'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: Toplu-UDF-PDF-Mac-1.04-notarized-${{ matrix.runner }}
           path: ${{ runner.temp }}/notarized-output
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain encrypted package while Apple is processing
+        if: steps.notarization.outputs.state == 'pending'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mac-notary-pending-${{ matrix.runner }}
+          path: ${{ runner.temp }}/notary-pending-output
           if-no-files-found: error
           retention-days: 30
       - name: Remove any leftover signing credentials

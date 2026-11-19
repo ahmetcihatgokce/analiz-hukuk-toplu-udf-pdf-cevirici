@@ -65,7 +65,7 @@ security import "$private_root/DeveloperIDG2CA.cer" -k "$keychain" >/dev/null
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
 security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
 rm -f -- "$p12"
-unset MAC_CERTIFICATE_P12_BASE64 MAC_CERTIFICATE_PASSWORD keychain_password
+unset MAC_CERTIFICATE_P12_BASE64 keychain_password
 
 security find-identity -v -p codesigning "$keychain" > "$private_root/identities.txt"
 identity_sha="$(python3 - "$private_root/identities.txt" <<'PY'
@@ -111,10 +111,7 @@ unset ASC_PRIVATE_KEY_P8
 submission_zip="$private_root/submission.zip"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$submission_zip"
 notary_json="$private_root/submission.json"
-set +e
-xcrun notarytool submit "$submission_zip" --key "$asc_key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait --timeout 15m --output-format json > "$notary_json"
-notary_result=$?
-set -e
+xcrun notarytool submit "$submission_zip" --key "$asc_key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --output-format json > "$notary_json" 2> "$private_root/submit.stderr" || fail 'Apple notarization upload failed.'
 notary_id="$(python3 - "$notary_json" <<'PY'
 import json, pathlib, re, sys
 try:
@@ -127,7 +124,16 @@ if not re.fullmatch(r'[0-9a-fA-F-]{36}', identifier):
 print(identifier)
 PY
 )"
-notary_status="$(python3 - "$notary_json" <<'PY'
+printf 'Apple notarization submission %s uploaded.\n' "$notary_id"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf 'Apple notarization submission: `%s` - uploaded; waiting for Apple.\n\n' "$notary_id" >> "$GITHUB_STEP_SUMMARY"
+fi
+set +e
+xcrun notarytool wait "$notary_id" --key "$asc_key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --timeout 15m --output-format json > "$private_root/wait.json" 2> "$private_root/wait.stderr"
+wait_result=$?
+set -e
+xcrun notarytool info "$notary_id" --key "$asc_key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --output-format json > "$private_root/status.json" 2> "$private_root/info.stderr" || fail 'Could not read Apple submission status; retain the submission ID above.'
+notary_status="$(python3 - "$private_root/status.json" <<'PY'
 import json, pathlib, sys
 status = json.loads(pathlib.Path(sys.argv[1]).read_text()).get('status', 'Unknown')
 print(status if status in {'Accepted', 'Invalid', 'In Progress', 'Rejected'} else 'Unknown')
@@ -137,6 +143,28 @@ printf 'Apple notarization submission %s: %s\n' "$notary_id" "$notary_status"
 if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     printf 'Apple notarization submission: `%s` — **%s**\n\n' "$notary_id" "$notary_status" >> "$GITHUB_STEP_SUMMARY"
 fi
+if [[ "$notary_status" == 'In Progress' ]]; then
+    pending="$RUNNER_TEMP/notary-pending-output"
+    [[ ! -e "$pending" ]] || fail 'Pending package output already exists.'
+    mkdir "$pending"
+    python3 - "$private_root/pending-metadata.json" "$notary_id" <<'PY'
+import json, os, pathlib, platform, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    'schemaVersion': 1, 'submissionId': sys.argv[2],
+    'architecture': platform.machine(), 'sourceCommit': os.environ['MAC_SOURCE_SHA'],
+    'teamId': os.environ['APPLE_TEAM_ID'],
+}) + '\n')
+PY
+    script_root="$(cd "$(dirname "$0")" && pwd)"
+    node "$script_root/notary-package.mjs" encrypt "$submission_zip" "$pending/envelope.json" "$private_root/pending-metadata.json"
+    unset MAC_CERTIFICATE_PASSWORD
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        printf 'state=pending\nsubmission_id=%s\n' "$notary_id" >> "$GITHUB_OUTPUT"
+    fi
+    printf 'Apple is still processing. Exact signed package saved as an encrypted pending artifact.\n'
+    exit 0
+fi
+unset MAC_CERTIFICATE_PASSWORD
 if [[ "$notary_status" != 'In Progress' ]]; then
     xcrun notarytool log "$notary_id" --key "$asc_key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" "$private_root/notary-log.json" >/dev/null
     python3 - "$private_root/notary-log.json" <<'PY'
@@ -149,7 +177,7 @@ if issues:
     raise SystemExit('Review Apple notarization issues before distributing this build.')
 PY
 fi
-[[ $notary_result -eq 0 && "$notary_status" == Accepted ]] || fail 'Apple has not accepted this submission. No distributable package was produced.'
+[[ "$notary_status" == Accepted ]] || fail 'Apple has not accepted this submission. No distributable package was produced.'
 xcrun stapler staple "$app"
 xcrun stapler validate "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -173,3 +201,6 @@ pathlib.Path(path).write_text(json.dumps({
 }, indent=2) + '\n')
 PY
 printf 'Notarized package: %s\n' "$archive_name"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf 'state=accepted\nsubmission_id=%s\n' "$notary_id" >> "$GITHUB_OUTPUT"
+fi

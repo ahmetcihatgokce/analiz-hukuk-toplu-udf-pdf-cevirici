@@ -34,7 +34,13 @@ Her işlemcide uygulama derlenip sentetik belgelerle test edilir. Bu testler, ki
 
 Apple `Accepted` döndürürse notarization günlüğü kontrol edilir. Bilet uygulamaya eklenir; `stapler validate`, imza doğrulama ve Gatekeeper değerlendirmesi geçmeden dağıtım ZIP'i oluşturulmaz. Artifact yalnız onaylanan ZIP, SHA-256 ve gizli bilgi içermeyen sonuç JSON'udur. Release veya site yayını otomatik yapılmaz. Artifact 30 gün tutulur.
 
-Kimlik bilgileri normal çıkışta ve hata/iptalde temizlenir. GitHub'ın geçici Mac makinesi iş sonunda kaldırılır. Apple yanıtı 15 dakikayı aşarsa gönderim kimliği iş özetinde tutulur; yeniden göndermeden önce mevcut gönderimin durumu incelenmelidir.
+Kimlik bilgileri normal çıkışta ve hata/iptalde temizlenir. GitHub'ın geçici Mac makinesi iş sonunda kaldırılır. Gönderim kimliği yükleme biter bitmez kaydedilir. Apple yanıtı 15 dakikayı aşarsa durum ayrıca sorgulanır; hâlâ işleniyorsa bu durum ret olarak değerlendirilmez.
+
+Bekleyen gönderimde tam imzalı ZIP, mevcut P12 parolasından HKDF ile türetilen bir anahtarla AES-256-GCM kullanılarak şifrelenir. Kaynak commit, işlemci, takım, gönderim kimliği ve ZIP özeti kimlik doğrulamalı metaveriye bağlanır. `mac-notary-pending-*` artifact'i kurulum paketi değildir; özel anahtar veya parola içermez. Bu şifreli dosya 30 gün saklanır.
+
+## Bekleyen gönderimi sürdürme
+
+`Resume existing Mac notarization` akışı, şifreli artifact'in bulunduğu `source_run_id` ve işlemci seçilerek elle çalıştırılır. Aynı korumalı ortam kullanılır. Eski gönderimin durumu sorgulanır; yeniden yükleme yapılmaz. Apple kabul etmişse özgün paket çözülür, imza/takım/kaynak ve arşiv yolları doğrulanır; bilet ve Gatekeeper kontrollerinden sonra dağıtım ZIP'i üretilir. Bu akış yalnız şifreli bekleme artifact'i bulunan gönderimlerde kullanılabilir.
 
 ## Doğrulama
 
