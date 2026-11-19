@@ -40,28 +40,93 @@ func normalize(_ text: String) -> String {
         .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
 }
 
-func colorBounds(_ page: PDFPage) throws -> [Double]? {
-    let media = page.bounds(for: .mediaBox)
-    let image = page.thumbnail(of: NSSize(width: media.width, height: media.height), for: .mediaBox)
-    guard let encoded = image.tiffRepresentation,
-          let bitmap = NSBitmapImageRep(data: encoded) else {
-        throw MetricsError.message("Cannot rasterize PDF for image comparison")
+struct PageRaster {
+    let media: CGRect
+    let bitmap: NSBitmapImageRep
+
+    init(_ page: PDFPage) throws {
+        media = page.bounds(for: .mediaBox)
+        guard media.width > 0, media.height > 0, media.width <= 2000, media.height <= 2000 else {
+            throw MetricsError.message("Synthetic comparison PDF has unexpected media dimensions")
+        }
+        // Twice PDF point resolution is 144 DPI. Actual bitmap dimensions are
+        // used below so platform backing-scale differences do not alter units.
+        let image = page.thumbnail(of: NSSize(width: media.width * 2, height: media.height * 2), for: .mediaBox)
+        guard let encoded = image.tiffRepresentation,
+              let decoded = NSBitmapImageRep(data: encoded), decoded.pixelsWide > 0, decoded.pixelsHigh > 0 else {
+            throw MetricsError.message("Cannot rasterize PDF for appearance comparison")
+        }
+        bitmap = decoded
     }
-    var minX = bitmap.pixelsWide, minY = bitmap.pixelsHigh, maxX = -1, maxY = -1
-    for y in 0..<bitmap.pixelsHigh {
-        for x in 0..<bitmap.pixelsWide {
-            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
-            if color.redComponent > 0.6 && color.greenComponent < 0.35 && color.blueComponent < 0.35 {
-                minX = min(minX, x); minY = min(minY, y)
-                maxX = max(maxX, x); maxY = max(maxY, y)
+
+    private func bounds(in region: CGRect?, redOnly: Bool) -> [Double]? {
+        let crop = (region ?? media).intersection(media)
+        guard !crop.isNull, !crop.isEmpty else { return nil }
+        let scaleX = Double(media.width) / Double(bitmap.pixelsWide)
+        let scaleY = Double(media.height) / Double(bitmap.pixelsHigh)
+        let left = max(0, Int(floor(Double(crop.minX - media.minX) / scaleX)))
+        let right = min(bitmap.pixelsWide, Int(ceil(Double(crop.maxX - media.minX) / scaleX)))
+        let top = max(0, Int(floor(Double(media.maxY - crop.maxY) / scaleY)))
+        let bottom = min(bitmap.pixelsHigh, Int(ceil(Double(media.maxY - crop.minY) / scaleY)))
+        guard left < right, top < bottom else { return nil }
+        var minX = right, minY = bottom, maxX = -1, maxY = -1
+        for y in top..<bottom {
+            for x in left..<right {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), color.alphaComponent > 0.1 else { continue }
+                let isInk = redOnly
+                    ? color.redComponent > 0.6 && color.greenComponent < 0.35 && color.blueComponent < 0.35
+                    : color.redComponent + color.greenComponent + color.blueComponent < 2.7
+                if isInk {
+                    minX = min(minX, x); minY = min(minY, y)
+                    maxX = max(maxX, x); maxY = max(maxY, y)
+                }
             }
         }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        if redOnly {
+            // Keep the existing top-origin colored-area metric for diagnostics.
+            return [Double(minX) * scaleX, Double(minY) * scaleY,
+                    Double(maxX - minX + 1) * scaleX, Double(maxY - minY + 1) * scaleY]
+        }
+        return [Double(media.minX) + Double(minX) * scaleX,
+                Double(media.maxY) - Double(maxY + 1) * scaleY,
+                Double(maxX - minX + 1) * scaleX, Double(maxY - minY + 1) * scaleY]
     }
-    guard maxX >= minX, maxY >= minY else { return nil }
-    let scaleX = Double(media.width) / Double(bitmap.pixelsWide)
-    let scaleY = Double(media.height) / Double(bitmap.pixelsHigh)
-    return [Double(minX) * scaleX, Double(minY) * scaleY,
-            Double(maxX - minX + 1) * scaleX, Double(maxY - minY + 1) * scaleY]
+
+    func redBounds() -> [Double]? { bounds(in: nil, redOnly: true) }
+
+    func phraseInk(_ selection: PDFSelection, on page: PDFPage, fontSize: CGFloat) -> ([Double]?, String?) {
+        let selectionBounds = selection.bounds(for: page)
+        guard selectionBounds.width > 0, selectionBounds.height > 0,
+              selectionBounds.height <= max(10, fontSize * 1.8) else {
+            return (nil, "Selection is empty or spans multiple lines; ink cannot be isolated safely")
+        }
+        // Restrict horizontal ink to the selected phrase advance. Do not grow
+        // it into an adjacent punctuation/word, which would measure other text.
+        var crop = selectionBounds.insetBy(dx: 0, dy: -3)
+        let center = selectionBounds.midY
+        var nearestAbove: CGFloat?
+        var nearestBelow: CGFloat?
+        for index in 0..<page.numberOfCharacters {
+            let character = page.characterBounds(at: index)
+            guard !character.isEmpty, character.maxX > crop.minX, character.minX < crop.maxX else { continue }
+            let delta = character.midY - center
+            if delta > max(4, fontSize * 0.6), nearestAbove == nil || character.midY < nearestAbove! {
+                nearestAbove = character.midY
+            }
+            if delta < -max(4, fontSize * 0.6), nearestBelow == nil || character.midY > nearestBelow! {
+                nearestBelow = character.midY
+            }
+        }
+        // Nearby lines can overlap a font-descriptor box expanded by 3 pt.
+        // Midpoints between their measured centers isolate only this text line.
+        let lower = nearestBelow.map { (center + $0) / 2 } ?? media.minY
+        let upper = nearestAbove.map { (center + $0) / 2 } ?? media.maxY
+        crop = crop.intersection(CGRect(x: crop.minX, y: lower, width: crop.width, height: upper - lower))
+        guard !crop.isNull, !crop.isEmpty else { return (nil, "Adjacent text prevents safe ink isolation") }
+        guard let ink = bounds(in: crop, redOnly: false) else { return (nil, "No visible ink in the isolated phrase region") }
+        return (ink, nil)
+    }
 }
 
 func run() throws {
@@ -71,12 +136,15 @@ func run() throws {
     let phrasesData = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2]))
     let phrases = try JSONDecoder().decode([String].self, from: phrasesData)
     var pages: [[String: Any]] = []
+    var rasters: [Int: PageRaster] = [:]
     for index in 0..<document.pageCount {
         guard let page = document.page(at: index) else { throw MetricsError.message("Missing PDF page") }
         let media = page.bounds(for: .mediaBox)
         var item: [String: Any] = ["width": media.width, "height": media.height,
                                     "text": normalize(page.string ?? "")]
-        if let red = try colorBounds(page) { item["redBounds"] = red }
+        let raster = try PageRaster(page)
+        rasters[index] = raster
+        if let red = raster.redBounds() { item["redBounds"] = red }
         else { item["redBounds"] = NSNull() }
         pages.append(item)
     }
@@ -87,14 +155,24 @@ func run() throws {
         for selection in matches {
             for page in selection.pages {
                 let bounds = selection.bounds(for: page)
-                var location: [String: Any] = ["page": document.index(for: page),
+                let pageIndex = document.index(for: page)
+                var location: [String: Any] = ["page": pageIndex,
                     "bounds": [Double(bounds.minX), Double(bounds.minY), Double(bounds.width), Double(bounds.height)]]
+                var pointSize: CGFloat = 12
                 if let text = selection.attributedString, text.length > 0,
                    let font = text.attribute(.font, at: 0, effectiveRange: nil) as? NSFont {
+                    pointSize = font.pointSize
                     location["fontSize"] = font.pointSize
                     let traits = NSFontManager.shared.traits(of: font)
                     location["bold"] = traits.contains(.boldFontMask)
                     location["italic"] = traits.contains(.italicFontMask)
+                }
+                if let raster = rasters[pageIndex] {
+                    let (ink, failure) = raster.phraseInk(selection, on: page, fontSize: pointSize)
+                    if let ink = ink { location["inkBounds"] = ink }
+                    else { location["inkBounds"] = NSNull(); location["inkIsolationFailure"] = failure ?? "unknown" }
+                } else {
+                    location["inkBounds"] = NSNull(); location["inkIsolationFailure"] = "Page raster unavailable"
                 }
                 locations.append(location)
             }
@@ -163,8 +241,16 @@ def compare_metrics(oracle: dict, native: dict, *, tolerance: float) -> list[str
             label = f"phrase {phrase!r} occurrence {ordinal + 1}"
             if a["page"] != b["page"]:
                 problems.append(label + ": page differs")
-            if not compare_numbers(a["bounds"], b["bounds"], tolerance):
-                problems.append(label + ": position/size differs")
+            # Font descriptor ascender/descender boxes differ across exporters.
+            # Compare visible ink for vertical appearance, while retaining strict
+            # PDF selection x/advance width and font/style checks independently.
+            if not compare_numbers([a["bounds"][0], a["bounds"][2]],
+                                   [b["bounds"][0], b["bounds"][2]], tolerance):
+                problems.append(label + ": horizontal position/advance width differs")
+            if a.get("inkBounds") is None or b.get("inkBounds") is None:
+                problems.append(label + ": visible ink could not be isolated safely")
+            elif not compare_numbers(a["inkBounds"], b["inkBounds"], tolerance):
+                problems.append(label + ": visible ink position/size differs")
             for key in ["bold", "italic"]:
                 if a.get(key) != b.get(key):
                     problems.append(label + f": {key} differs or font metadata unavailable")

@@ -203,6 +203,7 @@ enum NativeUDFSelfTest {
             }
 
             check("an intentional empty paragraph retains exactly one additional line of space") {
+                @MainActor
                 func lineGap(includeBlank: Bool, name: String) throws -> CGFloat {
                     var fixture = Fixture()
                     let first = fixture.paragraph("ABOVE_BLANK_SENTINEL\n")
