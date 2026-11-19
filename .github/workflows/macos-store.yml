@@ -1,0 +1,311 @@
+name: Mac App Store candidate tests
+on:
+  push:
+    branches: [macos-store]
+    paths:
+      - 'macos-store/**'
+      - '.github/workflows/macos-store.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-store-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-sandbox:
+    name: Native sandbox ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          persist-credentials: false
+      - name: Check Store packaging scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n macos-store/build-store.sh
+          bash -n macos-store/distribution/package-store.sh
+          python3 - <<'PY'
+          import pathlib, re
+          for name in ['build-store.sh', 'distribution/package-store.sh']:
+              source = pathlib.Path('macos-store', name).read_text()
+              for i, block in enumerate(re.findall(r"<<'PY'\n(.*?)\nPY", source, re.S)):
+                  compile(block, name + ':python-' + str(i), 'exec')
+          PY
+      - name: Build sandboxed test app
+        id: test-build
+        env:
+          MAC_STORE_TESTING: '1'
+        run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-tests" --no-zip
+      - name: Prepare synthetic files inside app container
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="$HOME/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests"
+          mkdir -p "$container/fixtures"
+          cp macos-store/Fixtures/official-synthetic.udf "$container/fixtures/official.udf"
+          cp macos-store/Fixtures/integration.rar "$container/fixtures/integration.rar"
+          printf '%s\n' 'Synthetic sandbox access test. This is not a real client document.' > "$RUNNER_TEMP/unselected-private-document.txt"
+          printf 'STORE_TEST_ROOT=%s\n' "$container" >> "$GITHUB_ENV"
+          printf 'UYAP_FIXTURE=%s\n' "$container/fixtures/official.udf" >> "$GITHUB_ENV"
+          printf 'MAC_RAR_FIXTURE=%s\n' "$container/fixtures/integration.rar" >> "$GITHUB_ENV"
+          printf 'STORE_SANDBOX_DENIED_PATH=%s\n' "$RUNNER_TEMP/unselected-private-document.txt" >> "$GITHUB_ENV"
+      - name: Test native UDF and PDF tools with sandbox enabled
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-tests/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf'
+          subprocess.run([str(app), '--store-self-test', os.environ['STORE_TEST_ROOT']], check=True, timeout=600)
+          subprocess.run([str(app), '--ui-smoke', os.environ['STORE_TEST_ROOT'] + '/application-window.png'], check=True, timeout=90)
+          PY
+      - name: Prepare official UYAP comparison engine for tests only
+        id: oracle
+        if: success()
+        env:
+          UYAP_PROBE_KEEP_RUNTIME: '1'
+        run: bash macos/ci/probe-macos.sh "$RUNNER_TEMP/store-official-baseline"
+      - name: Compare advanced native UDF output against official exporter
+        if: always() && steps.oracle.outcome == 'success'
+        env:
+          UDF_LAYOUT_DIAGNOSTICS: '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 macos-store/ci/prepare-canonical-comparison.py \
+            --canonical "$GITHUB_WORKSPACE/macos-store/Fixtures" \
+            --manifest "$GITHUB_WORKSPACE/macos-store/Fixtures/canonical-expectations.json" \
+            --output "$STORE_TEST_ROOT/compatibility-fixtures"
+          python3 macos-store/ci/compare-official.py \
+            --fixtures "$STORE_TEST_ROOT/compatibility-fixtures" \
+            --native "$RUNNER_TEMP/store-tests/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf" \
+            --native-work-root "$STORE_TEST_ROOT/official-native" \
+            --bridge-source macos/Resources/UyapBridge.java \
+            --output "$RUNNER_TEMP/official-comparison"
+      - name: Measure official font line metrics
+        if: always() && steps.oracle.outcome == 'success'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/font-metrics"
+          javac --release 8 -encoding UTF-8 -d "$RUNNER_TEMP/font-metrics" macos-store/ci/FontMetricsProbe.java
+          "$UYAP_TEST_JAVA" -Djava.awt.headless=true -cp "$RUNNER_TEMP/font-metrics:$UYAP_TEST_CLASSPATH" FontMetricsProbe
+      - name: Inspect public document writer APIs for synthetic compatibility tests
+        if: always() && steps.oracle.outcome == 'success'
+        continue-on-error: true
+        run: python3 macos-store/ci/inspect-oracle-api.py --output "$RUNNER_TEMP/oracle-api"
+      - name: Build release candidate without test entry points
+        run: bash macos-store/build-store.sh "$RUNNER_TEMP/store-candidate" --no-zip
+      - name: Verify release contents and sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/store-candidate/Toplu UDF PDF Cevirici.app"
+          codesign --verify --deep --strict "$app"
+          codesign -d --entitlements :- "$app" > "$RUNNER_TEMP/release-entitlements.plist" 2>/dev/null
+          python3 - "$app" "$RUNNER_TEMP/release-entitlements.plist" <<'PY'
+          import pathlib, plistlib, sys
+          app = pathlib.Path(sys.argv[1])
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleIdentifier'] == 'org.analizhukuk.udfpdf.mac'
+          assert info['AHStoreTestingBuild'] is False
+          entitlements = plistlib.loads(pathlib.Path(sys.argv[2]).read_bytes())
+          assert entitlements == {'com.apple.security.app-sandbox': True, 'com.apple.security.files.user-selected.read-write': True}
+          assert not any(p.suffix.lower() in {'.jar', '.java', '.class', '.dylib'} for p in app.rglob('*'))
+          print('PASS release sandbox, no Java and no test entry points')
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/Store-candidate-$(uname -m).zip"
+      - name: Retain synthetic reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: store-sandbox-report-${{ matrix.runner }}
+          path: |
+            ~/Library/Containers/org.analizhukuk.udfpdf.mac/Data/Library/Application Support/AnalizHukuk/StoreTests
+            ${{ runner.temp }}/store-official-baseline
+            ${{ runner.temp }}/official-comparison
+            ${{ runner.temp }}/oracle-api
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Retain tested Store candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: store-candidate-${{ matrix.runner }}
+          path: ${{ runner.temp }}/Store-candidate-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  universal-candidate:
+    name: Assemble tested universal Store candidate
+    needs: native-sandbox
+    if: github.repository == 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici'
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          persist-credentials: false
+      - name: Download tested Apple Silicon candidate from this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          name: store-candidate-macos-15
+          path: ${{ runner.temp }}/store-candidate-input/arm64
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Download tested Intel candidate from this run
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          name: store-candidate-macos-15-intel
+          path: ${{ runner.temp }}/store-candidate-input/x86_64
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Validate candidate archives before extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, stat, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-candidate-input'
+          app_name = 'Toplu UDF PDF Cevirici.app'
+          for architecture in ('arm64', 'x86_64'):
+              archive = root / architecture / ('Store-candidate-' + architecture + '.zip')
+              if not archive.is_file() or archive.is_symlink() or archive.stat().st_size > 64 * 1024 * 1024:
+                  raise SystemExit('Missing or oversized native candidate archive.')
+              if set(path.name for path in archive.parent.iterdir()) != {archive.name}:
+                  raise SystemExit('Unexpected files in the native artifact.')
+              with zipfile.ZipFile(archive) as bundle:
+                  entries = bundle.infolist()
+                  if len(entries) > 512 or sum(item.file_size for item in entries) > 128 * 1024 * 1024:
+                      raise SystemExit('Unexpected candidate archive size or entry count.')
+                  seen = set()
+                  for item in entries:
+                      path = pathlib.PurePosixPath(item.filename)
+                      canonical = path.as_posix().rstrip('/').casefold()
+                      mode = item.external_attr >> 16
+                      if (not path.parts or path.is_absolute() or '..' in path.parts or
+                          '\\' in item.filename or ':' in item.filename or
+                          path.parts[0] not in (app_name, '__MACOSX') or canonical in seen or
+                          stat.S_ISLNK(mode) or mode & 0o6000 or item.flag_bits & 1):
+                          raise SystemExit('Unsafe or unexpected entry in candidate archive.')
+                      seen.add(canonical)
+                  if app_name + '/Contents/MacOS/UdfPdf' not in bundle.namelist():
+                      raise SystemExit('The candidate has no app executable.')
+          PY
+          mkdir "$RUNNER_TEMP/store-arm64" "$RUNNER_TEMP/store-x86_64"
+          ditto -x -k "$RUNNER_TEMP/store-candidate-input/arm64/Store-candidate-arm64.zip" "$RUNNER_TEMP/store-arm64"
+          ditto -x -k "$RUNNER_TEMP/store-candidate-input/x86_64/Store-candidate-x86_64.zip" "$RUNNER_TEMP/store-x86_64"
+      - name: Verify matching resources, metadata and sandbox signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          arm="$RUNNER_TEMP/store-arm64/Toplu UDF PDF Cevirici.app"
+          intel="$RUNNER_TEMP/store-x86_64/Toplu UDF PDF Cevirici.app"
+          codesign --verify --deep --strict "$arm"
+          codesign --verify --deep --strict "$intel"
+          [[ "$(lipo -archs "$arm/Contents/MacOS/UdfPdf")" == arm64 ]]
+          [[ "$(lipo -archs "$intel/Contents/MacOS/UdfPdf")" == x86_64 ]]
+          codesign --display --entitlements :- "$arm" > "$RUNNER_TEMP/store-arm-entitlements.plist" 2>/dev/null
+          codesign --display --entitlements :- "$intel" > "$RUNNER_TEMP/store-intel-entitlements.plist" 2>/dev/null
+          python3 - <<'PY'
+          import hashlib, os, pathlib, plistlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          arm = root / 'store-arm64/Toplu UDF PDF Cevirici.app'
+          intel = root / 'store-x86_64/Toplu UDF PDF Cevirici.app'
+          expected_entitlements = plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes())
+          expected_info = {
+              'CFBundleIdentifier': 'org.analizhukuk.udfpdf.mac',
+              'CFBundleShortVersionString': '1.0.4', 'CFBundleVersion': '2',
+              'CFBundleExecutable': 'UdfPdf', 'AHStoreTestingBuild': False,
+              'LSMinimumSystemVersion': '13.0',
+              'LSApplicationCategoryType': 'public.app-category.productivity',
+          }
+          def contents(app):
+              inventory = {}
+              for path in app.rglob('*'):
+                  if path.is_symlink():
+                      raise SystemExit('Symlinks are not permitted in this single-executable app.')
+                  if not path.is_file():
+                      continue
+                  relative = path.relative_to(app).as_posix()
+                  if relative.startswith('Contents/_CodeSignature/') or relative == 'Contents/MacOS/UdfPdf':
+                      continue
+                  if relative != 'Contents/Info.plist' and not relative.startswith('Contents/Resources/'):
+                      raise SystemExit('Unexpected file in the native candidate bundle.')
+                  if path.suffix.lower() in {'.java', '.jar', '.class', '.dylib'}:
+                      raise SystemExit('Java and extra code libraries must not be bundled.')
+                  inventory[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+              info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+              if any(info.get(key) != value for key, value in expected_info.items()):
+                  raise SystemExit('Candidate metadata differs from the reviewed release.')
+              if 'Contents/Resources/PrivacyInfo.xcprivacy' not in inventory:
+                  raise SystemExit('The candidate is missing its privacy declaration.')
+              return inventory
+          if contents(arm) != contents(intel):
+              raise SystemExit('Native candidate resources or Info.plist differ; do not merge them.')
+          for name in ('store-arm-entitlements.plist', 'store-intel-entitlements.plist'):
+              if plistlib.loads((root / name).read_bytes()) != expected_entitlements:
+                  raise SystemExit('A native candidate has unexpected sandbox entitlements.')
+          print('PASS: identical resources and metadata, correct native slices and sandbox entitlements.')
+          PY
+      - name: Combine the tested binary slices and reseal the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/store-universal" "$RUNNER_TEMP/store-universal-output"
+          arm="$RUNNER_TEMP/store-arm64/Toplu UDF PDF Cevirici.app"
+          intel="$RUNNER_TEMP/store-x86_64/Toplu UDF PDF Cevirici.app"
+          app="$RUNNER_TEMP/store-universal/Toplu UDF PDF Cevirici.app"
+          ditto "$arm" "$app"
+          lipo -create "$arm/Contents/MacOS/UdfPdf" "$intel/Contents/MacOS/UdfPdf" -output "$app/Contents/MacOS/UdfPdf"
+          codesign --force --options runtime --generate-entitlement-der \
+            --entitlements macos-store/Store.entitlements --sign - "$app"
+          lipo "$app/Contents/MacOS/UdfPdf" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
+          codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-universal-entitlements.plist" 2>/dev/null
+          python3 - <<'PY'
+          import os, pathlib, plistlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          actual = plistlib.loads((root / 'store-universal-entitlements.plist').read_bytes())
+          expected = plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes())
+          if actual != expected:
+              raise SystemExit('Universal app has unexpected sandbox entitlements.')
+          app = root / 'store-universal/Toplu UDF PDF Cevirici.app'
+          for path in [app, *app.rglob('*')]:
+              if 'com.apple.quarantine' in os.listxattr(path, follow_symlinks=False):
+                  raise SystemExit('Remove the quarantine attribute from the built app before Store upload.')
+          PY
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/store-universal-output/Store-universal-candidate.zip"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-universal-output'
+          archive = output / 'Store-universal-candidate.zip'
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          (output / 'Store-universal-candidate.zip.sha256').write_text(digest + '  ' + archive.name + '\n')
+          (output / 'candidate.json').write_text(json.dumps({
+              'schemaVersion': 1, 'repository': os.environ['GITHUB_REPOSITORY'],
+              'workflowPath': '.github/workflows/macos-store.yml',
+              'sourceRunId': os.environ['GITHUB_RUN_ID'], 'sourceCommit': os.environ['GITHUB_SHA'],
+              'bundleIdentifier': 'org.analizhukuk.udfpdf.mac', 'version': '1.0.4', 'build': '2',
+              'architectures': ['arm64', 'x86_64'], 'archiveSha256': digest,
+              'signature': 'ad-hoc sandbox candidate', 'published': False,
+          }, indent=2) + '\n')
+          PY
+          printf '### Universal Store candidate\n\nMerged the two native slices after both sandbox jobs passed. Resource and metadata comparison, both native signatures and the universal sandbox signature passed. This is an ad-hoc candidate, not a published Store build.\n' >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the universal Store candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: Store-universal-candidate
+          path: ${{ runner.temp }}/store-universal-output
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?> 
+
+<template format_id="1.8" >
+<content><![CDATA[CANONICAL_ALPHA
+Türkçe sentetik test
+
+]]></content><properties><pageFormat mediaSizeName="1" leftMargin="42.525000000000006" rightMargin="42.525000000000006" topMargin="42.525000000000006" bottomMargin="42.52500000000006" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties><styles><style name="default" description="Geçerli" /><style name="hvl-default" family="Times New Roman" size="12" description="Gövde" /></styles>
+<elements resolver="hvl-default" >
+<paragraph><content family="Times New Roman" size="12" bold="false" italic="false" startOffset="0" length="16" /></paragraph><paragraph><content family="Times New Roman" size="12" bold="false" italic="false" startOffset="16" length="21" /></paragraph><paragraph><content startOffset="37" length="1" /></paragraph>
+</elements>
+
+</template>

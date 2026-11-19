@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" ?> 
+
+<template format_id="1.8" >
+<content><![CDATA[BREAK_FIRST
+
+
+BREAK_SECOND
+
+]]></content><properties><pageFormat mediaSizeName="1" leftMargin="42.525000000000006" rightMargin="42.525000000000006" topMargin="42.525000000000006" bottomMargin="42.52500000000006" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties><styles><style name="default" description="Geçerli" family="Dialog" size="12" bold="false" italic="false" FONT_ATTRIBUTE_KEY="javax.swing.plaf.FontUIResource[family=Dialog,name=Dialog,style=plain,size=12]" foreground="-13421773" /><style name="hvl-default" family="Times New Roman" size="12" description="Gövde" /></styles>
+<elements resolver="hvl-default" >
+<paragraph><content family="Times New Roman" size="12" bold="false" italic="false" startOffset="0" length="13" /></paragraph><page-break><paragraph><content startOffset="13" length="1" /></paragraph></page-break><paragraph><content family="Times New Roman" size="12" bold="false" italic="false" startOffset="14" length="13" /></paragraph><paragraph><content startOffset="27" length="1" /></paragraph>
+</elements>
+
+</template>
