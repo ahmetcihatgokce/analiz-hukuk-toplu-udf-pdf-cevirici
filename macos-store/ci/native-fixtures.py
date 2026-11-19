@@ -100,7 +100,8 @@ def generate(directory: Path) -> dict:
     styled = Document()
     styled.paragraph("BOLD_SENTINEL\n", text_attrs={"bold": "true", "size": "18"})
     styled.paragraph("ITALIC_SENTINEL\n", text_attrs={"italic": "true", "size": "12"})
-    styled.paragraph("UNDERLINE_SENTINEL\n", text_attrs={"underline": "true", "foreground": "16711680"})
+    # Java's Color.getRGB() serializes opaque red as signed ARGB -65536.
+    styled.paragraph("UNDERLINE_SENTINEL\n", text_attrs={"underline": "true", "foreground": "-65536"})
     good("styles.udf", styled, ["BOLD_SENTINEL", "ITALIC_SENTINEL", "UNDERLINE_SENTINEL"], 1)
 
     table_document = Document()

@@ -1,0 +1,214 @@
+name: Upload Mac App Store build
+
+# Install on main only after reviewing the pinned source and its successful CI run.
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful Mac App Store candidate tests run ID containing the universal artifact
+        required: true
+        type: string
+      reviewed_sha:
+        description: Must match the immutable APPROVED_SOURCE_SHA configured in this workflow
+        required: true
+        type: string
+        default: REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mac-store-upload-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upload-store-build:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici' &&
+      github.ref == 'refs/heads/main'
+    name: Validate and upload the reviewed universal Mac build
+    runs-on: macos-15
+    environment: mac-distribution
+    timeout-minutes: 30
+    env:
+      # Replace only after the immutable application and packaging source passes CI.
+      APPROVED_SOURCE_SHA: REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT
+      REQUESTED_SOURCE_SHA: ${{ inputs.reviewed_sha }}
+      REQUESTED_SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+    steps:
+      - name: Verify the approved source run and hard-coded artifact
+        id: source
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          repository = 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici'
+          approved = os.environ['APPROVED_SOURCE_SHA']
+          requested = os.environ['REQUESTED_SOURCE_SHA']
+          run_id = os.environ['REQUESTED_SOURCE_RUN_ID']
+          if not re.fullmatch(r'[0-9a-f]{40}', approved):
+              raise SystemExit('The workflow has no reviewed source SHA configured yet.')
+          if requested != approved or not re.fullmatch(r'[0-9a-f]{40}', requested):
+              raise SystemExit('The requested source must match APPROVED_SOURCE_SHA.')
+          if not re.fullmatch(r'[1-9][0-9]{0,19}', run_id):
+              raise SystemExit('source_run_id must contain only the numeric workflow run ID.')
+          if os.environ['GITHUB_REPOSITORY'] != repository or os.environ['GITHUB_REF'] != 'refs/heads/main':
+              raise SystemExit('Store uploads are only permitted from this repository main branch.')
+          def read_api(path):
+              request = urllib.request.Request('https://api.github.com/repos/' + repository + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          run = read_api('/actions/runs/' + run_id)
+          if (str(run.get('id')) != run_id or run.get('status') != 'completed' or
+              run.get('conclusion') != 'success' or run.get('head_sha') != approved or
+              run.get('path') != '.github/workflows/macos-store.yml' or
+              run.get('repository', {}).get('full_name') != repository or
+              run.get('head_repository', {}).get('full_name') != repository or
+              run.get('event') not in {'push', 'workflow_dispatch'} or
+              run.get('head_branch') not in {'macos-store', 'main'}):
+              raise SystemExit('The selected run is not a successful reviewed Store CI run.')
+          artifacts = read_api('/actions/runs/' + run_id + '/artifacts?per_page=100')
+          matches = [item for item in artifacts.get('artifacts', [])
+                     if item.get('name') == 'Store-universal-candidate' and not item.get('expired')]
+          if len(matches) != 1 or not isinstance(matches[0].get('id'), int):
+              raise SystemExit('Expected exactly one retained Store-universal-candidate artifact.')
+          if matches[0].get('size_in_bytes', 0) <= 0 or matches[0].get('size_in_bytes', 0) > 128 * 1024 * 1024:
+              raise SystemExit('The universal artifact has an unexpected size.')
+          artifact_run = matches[0].get('workflow_run') or {}
+          if str(artifact_run.get('id')) != run_id or artifact_run.get('head_sha') != approved:
+              raise SystemExit('Artifact provenance does not match the selected source run.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('artifact_id=' + str(matches[0]['id']) + '\nsource_run_id=' + run_id + '\n')
+          print('Verified successful Store CI run, immutable source and universal artifact provenance.')
+          PY
+      - name: Check out the reviewed packaging tools and entitlements
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          ref: ${{ env.APPROVED_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Download only the verified universal artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          path: ${{ runner.temp }}/store-universal-input
+          merge-multiple: true
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: ${{ steps.source.outputs.source_run_id }}
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Validate candidate source, archive digest and safe bundle contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$APPROVED_SOURCE_SHA" ]]
+          bash -n macos-store/distribution/package-store.sh
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, stat, zipfile
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-universal-input'
+          names = {'Store-universal-candidate.zip', 'Store-universal-candidate.zip.sha256', 'candidate.json'}
+          if set(path.name for path in root.iterdir()) != names or any(path.is_symlink() for path in root.iterdir()):
+              raise SystemExit('The universal artifact contains unexpected files.')
+          archive = root / 'Store-universal-candidate.zip'
+          if archive.stat().st_size > 64 * 1024 * 1024:
+              raise SystemExit('The universal candidate archive is too large.')
+          metadata = json.loads((root / 'candidate.json').read_text())
+          expected = {
+              'schemaVersion': 1, 'repository': 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici',
+              'workflowPath': '.github/workflows/macos-store.yml',
+              'sourceRunId': os.environ['REQUESTED_SOURCE_RUN_ID'],
+              'sourceCommit': os.environ['APPROVED_SOURCE_SHA'],
+              'bundleIdentifier': 'org.analizhukuk.udfpdf.mac', 'version': '1.0.4', 'build': '2',
+              'architectures': ['arm64', 'x86_64'], 'signature': 'ad-hoc sandbox candidate', 'published': False,
+          }
+          if any(metadata.get(key) != value for key, value in expected.items()):
+              raise SystemExit('The universal candidate manifest differs from the reviewed source run.')
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if not re.fullmatch(r'[0-9a-f]{64}', metadata.get('archiveSha256', '')) or metadata['archiveSha256'] != digest:
+              raise SystemExit('The universal archive digest does not match its manifest.')
+          if (root / 'Store-universal-candidate.zip.sha256').read_text() != digest + '  ' + archive.name + '\n':
+              raise SystemExit('The checksum file does not match the universal archive.')
+          app_name = 'Toplu UDF PDF Cevirici.app'
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              if len(entries) > 512 or sum(item.file_size for item in entries) > 128 * 1024 * 1024:
+                  raise SystemExit('Unexpected candidate archive size or entry count.')
+              seen = set()
+              for item in entries:
+                  path = pathlib.PurePosixPath(item.filename)
+                  canonical = path.as_posix().rstrip('/').casefold()
+                  mode = item.external_attr >> 16
+                  if (not path.parts or path.is_absolute() or '..' in path.parts or
+                      '\\' in item.filename or ':' in item.filename or
+                      path.parts[0] not in (app_name, '__MACOSX') or canonical in seen or
+                      stat.S_ISLNK(mode) or mode & 0o6000 or item.flag_bits & 1):
+                      raise SystemExit('Unsafe or unexpected entry in universal archive.')
+                  seen.add(canonical)
+              if app_name + '/Contents/MacOS/UdfPdf' not in bundle.namelist():
+                  raise SystemExit('The universal archive has no app executable.')
+          PY
+          mkdir "$RUNNER_TEMP/store-upload-candidate"
+          ditto -x -k "$RUNNER_TEMP/store-universal-input/Store-universal-candidate.zip" "$RUNNER_TEMP/store-upload-candidate"
+          app="$RUNNER_TEMP/store-upload-candidate/Toplu UDF PDF Cevirici.app"
+          codesign --verify --deep --strict "$app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/UdfPdf"
+          codesign --display --entitlements :- "$app" > "$RUNNER_TEMP/store-upload-entitlements.plist" 2>/dev/null
+          python3 - <<'PY'
+          import os, pathlib, plistlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          if plistlib.loads((root / 'store-upload-entitlements.plist').read_bytes()) != plistlib.loads(pathlib.Path('macos-store/Store.entitlements').read_bytes()):
+              raise SystemExit('The universal candidate has unexpected sandbox entitlements.')
+          app = root / 'store-upload-candidate/Toplu UDF PDF Cevirici.app'
+          for path in [app, *app.rglob('*')]:
+              if path.is_symlink():
+                  raise SystemExit('Unexpected symlink in the universal candidate.')
+              if 'com.apple.quarantine' in os.listxattr(path, follow_symlinks=False):
+                  raise SystemExit('The Store candidate contains a quarantine attribute.')
+          PY
+      - name: Sign, validate and upload the reviewed Store build
+        id: package
+        shell: bash
+        env:
+          APPLE_DISTRIBUTION_P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_P12_BASE64 }}
+          APPLE_DISTRIBUTION_P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+          INSTALLER_DISTRIBUTION_P12_BASE64: ${{ secrets.INSTALLER_DISTRIBUTION_P12_BASE64 }}
+          INSTALLER_DISTRIBUTION_P12_PASSWORD: ${{ secrets.INSTALLER_DISTRIBUTION_P12_PASSWORD }}
+          MAC_STORE_PROFILE_BASE64: ${{ secrets.MAC_STORE_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          MAC_STORE_SOURCE_SHA: ${{ env.APPROVED_SOURCE_SHA }}
+          MAC_STORE_UPLOAD: '1'
+        run: |
+          set -euo pipefail
+          bash macos-store/distribution/package-store.sh \
+            "$RUNNER_TEMP/store-upload-candidate/Toplu UDF PDF Cevirici.app" \
+            "$RUNNER_TEMP/store-upload-output"
+      - name: Remove any leftover temporary Store signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          temporary_root="$(cd "$RUNNER_TEMP" && pwd)"
+          for directory in "$temporary_root"/mac-store-signing.*; do
+            [[ -d "$directory" && ! -L "$directory" && "$directory" == "$temporary_root"/mac-store-signing.* ]] || continue
+            security delete-keychain "$directory/signing.keychain-db" >/dev/null 2>&1 || true
+            rm -rf -- "$directory"
+          done
+      - name: Retain the successfully uploaded Store package and receipt metadata
+        if: steps.package.outputs.state == 'uploaded'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: Mac-App-Store-1.0.4-build-2-uploaded
+          path: ${{ runner.temp }}/store-upload-output
+          if-no-files-found: error
+          retention-days: 30

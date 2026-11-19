@@ -173,6 +173,24 @@ def compare_metrics(oracle: dict, native: dict, *, tolerance: float) -> list[str
     return problems
 
 
+def print_diagnostics(name: str, oracle: dict, native: dict) -> None:
+    """Keep enough public synthetic measurements in logs to diagnose CI failures."""
+    def summary(metrics: dict) -> dict:
+        selected = metrics["phrases"][:3]
+        if len(metrics["phrases"]) > 3:
+            selected = selected + metrics["phrases"][-1:]
+        return {
+            "pageCount": metrics["pageCount"],
+            "pages": [{"width": page["width"], "height": page["height"],
+                       "redBounds": page["redBounds"], "textCharacters": len(page["text"])}
+                      for page in metrics["pages"][:8]],
+            "phrases": [{"phrase": item["phrase"], "locations": item["locations"][:3]}
+                        for item in selected],
+        }
+    print("DIAG " + json.dumps({"file": name, "official": summary(oracle), "native": summary(native)},
+                               ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixtures", type=Path, required=True, help="native-fixtures.py output folder")
@@ -241,6 +259,9 @@ def main() -> int:
             if oracle.returncode or not official_pdf.is_file():
                 results.append({"file": name, "status": "oracle-rejected-fixture", "problems": ["Official exporter did not accept this fixture; compatibility is unvalidated"]})
                 print("FAIL " + name + ": official exporter did not accept fixture")
+                print("ORACLE_ERROR " + json.dumps({"file": name, "exitCode": oracle.returncode,
+                                                    "logTail": oracle.stdout[-2500:]},
+                                                   ensure_ascii=False, separators=(",", ":")), flush=True)
                 continue
             native = invoke([str(args.native), "--batch", str(native_input), str(native_output)], timeout=120)
             write_log(case / "native.log", native)
@@ -248,6 +269,9 @@ def main() -> int:
             if native.returncode or not native_pdf_source.is_file():
                 results.append({"file": name, "status": "native-render-failed", "problems": ["Native app did not produce a PDF for an official-exporter-accepted fixture"]})
                 print("FAIL " + name + ": native renderer failed")
+                print("NATIVE_ERROR " + json.dumps({"file": name, "exitCode": native.returncode,
+                                                    "logTail": native.stdout[-2500:]},
+                                                   ensure_ascii=False, separators=(",", ":")), flush=True)
                 continue
             native_pdf = case / "native.pdf"
             shutil.copyfile(native_pdf_source, native_pdf)
@@ -262,6 +286,7 @@ def main() -> int:
                 metrics = json.loads(metric_result.stdout)
                 (case / (label + "-metrics.json")).write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 snapshots.append(metrics)
+            print_diagnostics(name, snapshots[0], snapshots[1])
             problems = compare_metrics(snapshots[0], snapshots[1], tolerance=args.bounds_tolerance)
             if item.get("pageCount") is not None and snapshots[0]["pageCount"] != item["pageCount"]:
                 problems.append("Oracle page count does not match fixture design; the assumed schema is unvalidated")

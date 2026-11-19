@@ -77,7 +77,7 @@ enum MacSelfTest {
             }
 
             await check("local HTML, Turkish CP1254 and inert JavaScript") {
-                let html = "<html><head><meta charset=\"windows-1254\"><style>td{border:1px solid;padding:6px}</style></head><body><h1>Vekâlet pulu makbuzu</h1><p>Şığüöç</p><table><tr><td>125,00 TL</td></tr></table><script>document.body.textContent='SCRIPT_RAN'</script><img src=\"https://example.invalid/never-request.png\"></body></html>"
+                let html = "<html><head><meta charset=\"windows-1254\"><style>td{border:1px solid;padding:6px}</style></head><body><h1>Vekâlet pulu makbuzu</h1><p>Şığüöç</p><table><tr><td>125,00 TL</td></tr></table><script>document.body.textContent='SCRIPT_RAN'</script></body></html>"
                 let url = inputs.appendingPathComponent("makbuz.htm")
                 let encoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.windowsLatin5.rawValue)))
                 guard let data = html.data(using: encoding) else { throw ConversionFailure("CP1254 fixture encoding failed") }
@@ -89,6 +89,13 @@ enum MacSelfTest {
                     try require(text.contains(expected), "HTML text missing: \(expected)")
                 }
                 try require(!text.contains("SCRIPT_RAN"), "HTML script executed")
+            }
+
+            await check("HTML rejects online resources without creating a partial PDF") {
+                let url = inputs.appendingPathComponent("online-resource.htm")
+                try Data("<html><body><p>REQUIRED_TEXT</p><img src='https://example.invalid/never-request.png'></body></html>".utf8).write(to: url)
+                let results = await engine.convert(inputs: [url], outputDirectory: root.appendingPathComponent("online-html"), archivesCopyPDFOnly: false) { _, _, _ in }
+                try require(results.count == 1 && results[0].error != nil && results[0].output == nil, "Online-resource HTML should fail clearly instead of silently dropping resources")
             }
 
             await check("native UDF conversion and malformed file isolation") {

@@ -10,6 +10,20 @@ import PDFKit
 enum UDFRenderer {
     private static let maximumPages = 1000
     private static let maximumPDFBytes = 256 * 1024 * 1024
+#if STORE_TESTING
+    private static var diagnosticLayoutsPrinted = 0
+
+    private static func diagnose(_ layout: Layout) {
+        guard ProcessInfo.processInfo.environment["UDF_LAYOUT_DIAGNOSTICS"] == "1",
+              diagnosticLayoutsPrinted < 8 else { return }
+        diagnosticLayoutsPrinted += 1
+        var lines: [String] = []
+        layout.manager.enumerateLineFragments(forGlyphRange: layout.range) { rectangle, used, _, range, _ in
+            lines.append("glyphs=\(range.location):\(range.length),line=\(NSStringFromRect(rectangle)),used=\(NSStringFromRect(used))")
+        }
+        print("UDF_LAYOUT_DIAGNOSTIC chars=\(layout.storage.length) glyphs=\(layout.range.location):\(layout.range.length) usedHeight=\(layout.usedHeight) usedRect=\(NSStringFromRect(layout.manager.usedRect(for: layout.container))) extra=\(NSStringFromRect(layout.manager.extraLineFragmentRect)) lines=\(lines.joined(separator: ";"))")
+    }
+#endif
 
     static func render(_ document: UDFDocument, to output: URL) throws {
         let format = document.pageFormat
@@ -173,6 +187,9 @@ enum UDFRenderer {
             self.range = manager.glyphRange(for: container)
             self.size = size
             self.usedHeight = manager.usedRect(for: container).maxY
+#if STORE_TESTING
+            UDFRenderer.diagnose(self)
+#endif
         }
 
         init(storage: NSTextStorage, manager: NSLayoutManager, container: NSTextContainer,
@@ -183,6 +200,9 @@ enum UDFRenderer {
             self.range = range
             self.size = size
             self.usedHeight = manager.usedRect(for: container).maxY
+#if STORE_TESTING
+            UDFRenderer.diagnose(self)
+#endif
         }
 
         var isComplete: Bool { NSMaxRange(range) == manager.numberOfGlyphs }

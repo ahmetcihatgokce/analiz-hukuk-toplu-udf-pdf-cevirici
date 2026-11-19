@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 import ImageIO
 import PDFKit
-import WebKit
 
 struct ConversionResult {
     let input: URL
@@ -172,8 +171,7 @@ final class ConversionEngine {
             guard size <= 16 * 1024 * 1024 else {
                 throw ConversionFailure("HTML belgesi 16 MB sınırını aşıyor.")
             }
-            let renderer = LocalHTMLRenderer()
-            let data = try await renderer.render(input)
+            let data = try OfflineHTMLRenderer.render(input: input)
             try NativePDF.writePaginatedHTML(data: data, output: output)
         case "tif", "tiff", "jpg", "jpeg", "png", "bmp", "gif":
             try await Task.detached(priority: .userInitiated) {
@@ -268,9 +266,9 @@ final class ConversionEngine {
         guard let data = document.dataRepresentation(), document.pageCount > 0 else {
             throw ConversionFailure("PDF oluşturulamadı.")
         }
-        let directory = output.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
-        try ensureDirectory(directory)
-        let staged = directory.appendingPathComponent(".udfpdf-\(UUID().uuidString).pdf")
+        // NSSavePanel grants the selected file, not arbitrary siblings in its
+        // parent. Stage in the app container before publishing that exact file.
+        let staged = files.temporaryDirectory.appendingPathComponent(".udfpdf-\(UUID().uuidString).pdf")
         defer { try? files.removeItem(at: staged) }
         try data.write(to: staged, options: .atomic)
         try NativePDF.validate(staged)
@@ -386,69 +384,3 @@ private enum NativePDF {
     }
 }
 
-@MainActor
-private final class LocalHTMLRenderer: NSObject, WKNavigationDelegate {
-    private var webView: WKWebView?
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var timeoutTask: Task<Void, Never>?
-
-    func render(_ input: URL) async throws -> Data {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        let rules = """
-        [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},
-         {"trigger":{"url-filter":"^file:"},"action":{"type":"ignore-previous-rules"}},
-         {"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}},
-         {"trigger":{"url-filter":"^about:"},"action":{"type":"ignore-previous-rules"}}]
-        """
-        let compiled: WKContentRuleList = try await withCheckedThrowingContinuation { result in
-            WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "LocalDocumentsOnly", encodedContentRuleList: rules) { list, error in
-                if let list = list { result.resume(returning: list) }
-                else { result.resume(throwing: error ?? ConversionFailure("Yerel HTML kuralları hazırlanamadı.")) }
-            }
-        }
-        configuration.userContentController.add(compiled)
-        let browser = WKWebView(frame: CGRect(x: 0, y: 0, width: 535.28, height: 781.89), configuration: configuration)
-        browser.navigationDelegate = self
-        webView = browser
-        return try await withCheckedThrowingContinuation { result in
-            continuation = result
-            timeoutTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 45_000_000_000)
-                guard !Task.isCancelled else { return }
-                self?.finish(.failure(ConversionFailure("HTML dönüşümü zaman aşımına uğradı.")))
-            }
-            browser.loadFileURL(input, allowingReadAccessTo: input.deletingLastPathComponent())
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        webView.createPDF(configuration: WKPDFConfiguration()) { [weak self] result in
-            Task { @MainActor in self?.finish(result) }
-        }
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        finish(.failure(error))
-    }
-
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        finish(.failure(error))
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        let scheme = navigationAction.request.url?.scheme?.lowercased() ?? ""
-        decisionHandler(["file", "data", "about"].contains(scheme) ? .allow : .cancel)
-    }
-
-    private func finish(_ result: Result<Data, Error>) {
-        guard let waiting = continuation else { return }
-        continuation = nil
-        timeoutTask?.cancel()
-        webView?.stopLoading()
-        webView?.navigationDelegate = nil
-        webView = nil
-        waiting.resume(with: result)
-    }
-}
