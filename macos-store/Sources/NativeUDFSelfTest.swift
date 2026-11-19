@@ -538,7 +538,11 @@ enum NativeUDFSelfTest {
     }
 
     private static func alphaAppearance(_ page: PDFPage) throws -> AlphaAppearance {
-        let image = page.thumbnail(of: NSSize(width: 400, height: 570), for: .mediaBox)
+        let media = page.bounds(for: .mediaBox)
+        // Use 144 DPI for stable interior glyph coverage. Interpret pixels in
+        // the renderer's declared sRGB space below; device RGB depends on the
+        // runner's display profile and is not the document's color space.
+        let image = page.thumbnail(of: NSSize(width: media.width * 2, height: media.height * 2), for: .mediaBox)
         guard let encoded = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: encoded),
               bitmap.pixelsWide > 4, bitmap.pixelsHigh > 4 else {
             throw Failure(message: "ARGB fixture cannot be rasterized")
@@ -550,7 +554,7 @@ enum NativeUDFSelfTest {
         // white paper before comparing their visible appearance.
         for y in 2..<(bitmap.pixelsHigh - 2) {
             for x in 2..<(bitmap.pixelsWide - 2) {
-                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
                 let alpha = color.alphaComponent
                 let red = 1 - alpha + alpha * color.redComponent
                 let green = 1 - alpha + alpha * color.greenComponent
