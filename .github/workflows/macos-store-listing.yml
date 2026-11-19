@@ -1,0 +1,178 @@
+name: Prepare real Mac App Store listing assets
+
+# Deliberately does not rebuild the app or trigger on application-source changes.
+on:
+  push:
+    branches: [macos-store]
+    paths:
+      - '.github/workflows/macos-store-listing.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  listing-assets:
+    if: github.repository == 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REPORT_SOURCE_RUN_ID: '44534145259'
+      REPORT_ARM_JOB_ID: '135595014399'
+      REPORT_SOURCE_SHA: '05558a5da277706f0ac92726d06395ccbd9f5718'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, Node.js 24
+        with:
+          persist-credentials: false
+      - name: Verify the successful screenshot-producing job and matching current UI source
+        id: source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, urllib.request
+          repository = 'ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici'
+          run_id = os.environ['REPORT_SOURCE_RUN_ID']
+          source_sha = os.environ['REPORT_SOURCE_SHA']
+          def read_api(path):
+              request = urllib.request.Request('https://api.github.com/repos/' + repository + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'],
+                  'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+          run = read_api('/actions/runs/' + run_id)
+          if (run.get('head_sha') != source_sha or run.get('path') != '.github/workflows/macos-store.yml' or
+              run.get('repository', {}).get('full_name') != repository or
+              run.get('head_repository', {}).get('full_name') != repository):
+              raise SystemExit('Unexpected screenshot source run.')
+          job = read_api('/actions/jobs/' + os.environ['REPORT_ARM_JOB_ID'])
+          if (str(job.get('run_id')) != run_id or job.get('name') != 'Native sandbox macos-15' or
+              job.get('status') != 'completed' or job.get('conclusion') != 'success'):
+              raise SystemExit('The screenshot-producing Apple Silicon job did not pass.')
+          # UI screenshots remain valid after renderer changes only if App.swift
+          # still exactly matches the source that produced the screenshot.
+          remote_ui = read_api('/contents/macos-store/Sources/App.swift?ref=' + source_sha)
+          current_ui = pathlib.Path('macos-store/Sources/App.swift').read_bytes()
+          current_blob = hashlib.sha1(b'blob ' + str(len(current_ui)).encode() + b'\0' + current_ui).hexdigest()
+          if remote_ui.get('sha') != current_blob:
+              raise SystemExit('The current Store UI changed; capture a new genuine app screenshot first.')
+          text = current_ui.decode('utf-8')
+          if 'Mac 1.04' not in text or 'Mac önizleme' in text or 'Mac preview' in text:
+              raise SystemExit('Expected the stable 1.04 Store UI source.')
+          response = read_api('/actions/runs/' + run_id + '/artifacts?per_page=100')
+          reports = [item for item in response.get('artifacts', [])
+                     if item.get('name') == 'store-sandbox-report-macos-15' and not item.get('expired')]
+          if len(reports) != 1:
+              raise SystemExit('Expected one retained genuine Apple Silicon report artifact.')
+          report = reports[0]
+          if (str((report.get('workflow_run') or {}).get('id')) != run_id or
+              (report.get('workflow_run') or {}).get('head_sha') != source_sha or
+              not 0 < report.get('size_in_bytes', 0) <= 32 * 1024 * 1024):
+              raise SystemExit('Unexpected report artifact provenance or size.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('artifact_id=' + str(report['id']) + '\n')
+          print('Verified successful native screenshot job and byte-identical current Store UI source.')
+          PY
+      - name: Download only the genuine synthetic Store test report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2, Node.js 24
+        with:
+          artifact-ids: ${{ steps.source.outputs.artifact_id }}
+          path: ${{ runner.temp }}/store-listing-report
+          merge-multiple: true
+          repository: ahmetcihatgokce/analiz-hukuk-toplu-udf-pdf-cevirici
+          run-id: '44534145259'
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+      - name: Prepare isolated screenshot-formatting tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/store-listing-tools"
+          "$RUNNER_TEMP/store-listing-tools/bin/python" -m pip install --disable-pip-version-check 'Pillow==12.0.0'
+      - name: Preserve the real screenshot and proportionally pad upload-size variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/store-listing-tools/bin/python" - <<'PY'
+          import hashlib, json, os, pathlib, shutil
+          from PIL import Image, ImageOps
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-listing-report'
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'store-listing-assets'
+          screenshots = output / 'screenshots-tr-TR'
+          originals = output / 'original-source'
+          screenshots.mkdir(parents=True)
+          originals.mkdir()
+          images = [path for path in report.rglob('application-window.png') if path.is_file() and not path.is_symlink()]
+          if len(images) != 1:
+              raise SystemExit('Expected exactly one genuine application-window.png in the verified report.')
+          source = images[0]
+          shutil.copyfile(source, originals / 'application-window.png')
+          source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+          Image.MAX_IMAGE_PIXELS = 20_000_000
+          with Image.open(source) as image:
+              image.load()
+              if image.width < 500 or image.height < 400:
+                  raise SystemExit('The genuine app screenshot is too small for readable Store assets.')
+              rgba = image.convert('RGBA')
+              opaque = Image.new('RGBA', rgba.size, '#f2f2f2')
+              opaque.alpha_composite(rgba)
+              original_rgb = opaque.convert('RGB')
+              records = []
+              for width, height in ((1280, 800), (1440, 900)):
+                  # Preserve all genuine UI pixels: no crop, overlays, replacement
+                  # labels, generated controls, or alterations to app content.
+                  fitted = ImageOps.contain(original_rgb, (width - 64, height - 64), Image.Resampling.LANCZOS)
+                  canvas = Image.new('RGB', (width, height), '#f2f2f2')
+                  canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+                  filename = f'01-Analiz-Hukuk-UDF-PDF-Mac-{width}x{height}.png'
+                  path = screenshots / filename
+                  canvas.save(path, format='PNG', optimize=True)
+                  with Image.open(path) as check:
+                      if check.size != (width, height) or check.mode != 'RGB':
+                          raise SystemExit('Invalid Store screenshot dimensions or color mode.')
+                  records.append({'file': 'screenshots-tr-TR/' + filename, 'width': width, 'height': height,
+                                  'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+              original_size = list(original_rgb.size)
+          fixtures = [path for path in report.rglob('canonical-baseline.udf') if path.is_file() and not path.is_symlink()]
+          if fixtures:
+              hashes = {hashlib.sha256(path.read_bytes()).hexdigest() for path in fixtures}
+              if len(hashes) != 1:
+                  raise SystemExit('Ambiguous canonical baseline fixtures in the report.')
+              fixture = sorted(fixtures)[0]
+          else:
+              fixture = pathlib.Path('macos-store/Fixtures/official-synthetic.udf')
+          if not fixture.is_file() or fixture.is_symlink() or fixture.stat().st_size > 2 * 1024 * 1024:
+              raise SystemExit('The synthetic review fixture is missing or oversized.')
+          shutil.copyfile(fixture, output / 'Ornek-Sentetik-UDF.udf')
+          (output / 'source-manifest.json').write_text(json.dumps({
+              'sourceRunId': os.environ['REPORT_SOURCE_RUN_ID'], 'sourceCommit': os.environ['REPORT_SOURCE_SHA'],
+              'sourceJobId': os.environ['REPORT_ARM_JOB_ID'], 'originalScreenshotSha256': source_hash,
+              'originalScreenshotSize': original_size, 'transformation': 'proportional resize and neutral padding only',
+              'screenshots': records, 'sampleIsSynthetic': True,
+              'sampleSha256': hashlib.sha256(fixture.read_bytes()).hexdigest(),
+              'sourceUiMatchesCurrentCommit': True,
+          }, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          (output / 'YUKLEME-NOTU.txt').write_text(
+              'Analiz Hukuk UDF PDF Çevirici — Mac 1.04\n\n'
+              'screenshots-tr-TR klasöründeki 1280x800 veya 1440x900 PNG, App Store Connect Mac ekran görüntüsü alanı içindir. '
+              'Bunlar aynı gerçek uygulama görüntüsünün alternatif boyutlarıdır; ikisini farklı özellik ekranları gibi yüklemeyin.\n\n'
+              'Görüntü gerçek başarılı Apple Silicon sandbox testinden alınmıştır. Tüm arayüz korunmuş, yalnızca orantılı ölçekleme '
+              've nötr kenar boşluğu uygulanmıştır. original-source klasöründe değiştirilmemiş özgün PNG bulunur. '
+              'Uygulama kontrolü, sonuç veya metin uydurulmamıştır.\n\n'
+              'Ornek-Sentetik-UDF.udf gerçek müvekkil belgesi değildir; App Review test örneğidir. '
+              'Bu paket bir uygulama yüklemesi veya mağaza yayını yapmaz.\n\n'
+              'Apple Mac boyutları: 1280x800, 1440x900, 2560x1600, 2880x1800 (16:10).\n'
+              'Kaynak: https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications\n',
+              encoding='utf-8')
+          print('Prepared genuine, proportional 16:10 Mac listing screenshots and a synthetic UDF review sample.')
+          PY
+      - name: Retain upload-ready Turkish listing assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node.js 24
+        with:
+          name: Mac-App-Store-Turkce-Gorseller-ve-Sentetik-Ornek
+          path: ${{ runner.temp }}/store-listing-assets
+          if-no-files-found: error
+          retention-days: 30
