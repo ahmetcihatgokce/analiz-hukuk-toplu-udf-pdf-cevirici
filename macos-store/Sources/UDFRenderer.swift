@@ -10,6 +10,20 @@ import PDFKit
 enum UDFRenderer {
     private static let maximumPages = 1000
     private static let maximumPDFBytes = 256 * 1024 * 1024
+    private static let cellBorderAttribute = NSAttributedString.Key("AnalizUDFCellBorder")
+
+    @MainActor
+    private final class CellBorder {
+        let block: NSTextTableBlock
+        let edges: Int // top = 1, right = 2, bottom = 4, left = 8
+        let characterRange: NSRange
+
+        init(block: NSTextTableBlock, edges: Int, characterRange: NSRange) {
+            self.block = block
+            self.edges = edges
+            self.characterRange = characterRange
+        }
+    }
 #if STORE_TESTING
     private static var diagnosticLayoutsPrinted = 0
 
@@ -245,6 +259,33 @@ enum UDFRenderer {
                     throw ConversionFailure("UDF harf veya görsel sınırları sayfa alanına sığmıyor.")
                 }
             }
+            for (overlay, _, frame) in borderFrames() {
+                guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+                      frame.width.isFinite, frame.height.isFinite,
+                      frame.width > 0, frame.height > 0,
+                      frame.minX >= -3, frame.maxX <= size.width + 3,
+                      overlay.edges > 0 else {
+                    throw ConversionFailure("UDF tablo kenarlığının yerleşimi doğrulanamadı.")
+                }
+            }
+        }
+
+        private func borderFrames() -> [(CellBorder, NSRange, NSRect)] {
+            guard range.length > 0 else { return [] }
+            let characters = manager.characterRange(forGlyphRange: range, actualGlyphRange: nil)
+            var seen: Set<ObjectIdentifier> = []
+            var result: [(CellBorder, NSRange, NSRect)] = []
+            storage.enumerateAttribute(UDFRenderer.cellBorderAttribute, in: characters) { value, _, _ in
+                guard let overlays = value as? [CellBorder] else { return }
+                for overlay in overlays where seen.insert(ObjectIdentifier(overlay)).inserted {
+                    let glyphs = manager.glyphRange(forCharacterRange: overlay.characterRange, actualCharacterRange: nil)
+                    let visible = NSIntersectionRange(glyphs, range)
+                    guard visible.length > 0 else { continue }
+                    let frame = manager.boundsRect(for: overlay.block, at: visible.location, effectiveRange: nil)
+                    result.append((overlay, glyphs, frame))
+                }
+            }
+            return result
         }
 
         func draw(at point: CGPoint, in context: CGContext) {
@@ -254,6 +295,30 @@ enum UDFRenderer {
             // validation above permits, rather than validating then clipping it.
             context.clip(to: CGRect(origin: point, size: size).insetBy(dx: -3, dy: -3))
             manager.drawBackground(forGlyphRange: range, at: point)
+            // UYAP draws cell borders over the row geometry; borders do not add
+            // padding or one extra point to every line of a long table.
+            context.setStrokeColor(CGColor(gray: 0, alpha: 1))
+            context.setLineWidth(0.5)
+            for (overlay, glyphs, frame) in borderFrames() {
+                let box = frame.offsetBy(dx: point.x, dy: point.y).insetBy(dx: 0.25, dy: 0.25)
+                if overlay.edges & 1 != 0 && range.location <= glyphs.location {
+                    context.move(to: CGPoint(x: box.minX, y: box.minY))
+                    context.addLine(to: CGPoint(x: box.maxX, y: box.minY))
+                }
+                if overlay.edges & 2 != 0 {
+                    context.move(to: CGPoint(x: box.maxX, y: box.minY))
+                    context.addLine(to: CGPoint(x: box.maxX, y: box.maxY))
+                }
+                if overlay.edges & 4 != 0 && NSMaxRange(range) >= NSMaxRange(glyphs) {
+                    context.move(to: CGPoint(x: box.minX, y: box.maxY))
+                    context.addLine(to: CGPoint(x: box.maxX, y: box.maxY))
+                }
+                if overlay.edges & 8 != 0 {
+                    context.move(to: CGPoint(x: box.minX, y: box.minY))
+                    context.addLine(to: CGPoint(x: box.minX, y: box.maxY))
+                }
+                context.strokePath()
+            }
             manager.drawGlyphs(forGlyphRange: range, at: point)
             context.restoreGState()
         }
@@ -410,7 +475,47 @@ enum UDFRenderer {
                 if !value.string.hasSuffix("\n") && !value.string.hasSuffix("\r") {
                     value.append(NSAttributedString(string: "\n", attributes: last))
                 }
-                let style = paragraphAttributes(paragraph.style, parents: parents)
+                var ordinaryLineHeight: CGFloat?
+                if paragraph.runs.allSatisfy({ run in
+                    run.image == nil && run.style.superscript == 0 &&
+                    !run.text.unicodeScalars.contains(where: { $0.value > 0xffff })
+                }) {
+                    var natural: CGFloat = 0
+                    var roundedHeights: Set<Int> = []
+                    value.enumerateAttribute(.font, in: NSRange(location: 0, length: value.length)) { font, _, _ in
+                        if let font = font as? NSFont {
+                            let measured = font.ascender - font.descender + font.leading
+                            if measured.isFinite && measured > 0 {
+                                natural = max(natural, measured)
+                                roundedHeights.insert(Int(ceil(measured)))
+                            }
+                        }
+                    }
+                    if natural > 0 && natural.isFinite {
+                        if roundedHeights.count > 1 {
+                            let text = value.string as NSString
+                            let terminatorLength = value.string.hasSuffix("\r\n") ? 2 : 1
+                            let body = text.substring(to: max(0, text.length - terminatorLength))
+                            let available = width - CGFloat(max(paragraph.style.leftIndent,
+                                paragraph.style.leftIndent + paragraph.style.firstLineIndent))
+                                - CGFloat(paragraph.style.rightIndent)
+                            // Applying one maximum height to wrapped mixed-size
+                            // text can move every subsequent line. Until per-line
+                            // Swing metrics are verified, reject that layout
+                            // instead of silently changing its pagination.
+                            guard body.rangeOfCharacter(from: .newlines) == nil,
+                                  available > 0, value.size().width <= available + 0.25 else {
+                                throw ConversionFailure("Farklı yazı yüksekliği içeren çok satırlı UDF paragrafının düzeni henüz doğrulanmadı.")
+                            }
+                        }
+                        // The official Swing exporter advances ordinary lines
+                        // by its rounded natural font metrics (Times 12 -> 14pt),
+                        // rather than Cocoa's larger default line fragment.
+                        ordinaryLineHeight = ceil(natural) * CGFloat(1 + paragraph.style.lineSpacing)
+                    }
+                }
+                let style = paragraphAttributes(paragraph.style, parents: parents,
+                                                ordinaryLineHeight: ordinaryLineHeight)
                 value.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: value.length))
                 result.append(value)
             case .image(let image):
@@ -460,32 +565,24 @@ enum UDFRenderer {
                   occupied.allSatisfy({ $0.count == columns }) else {
                 throw ConversionFailure("UDF tablosunun sütun yerleşimi tamamlanamıyor.")
             }
-            let explicitWidths: [CGFloat]?
+            // Canonical UYAP columnSpans are proportional weights across the
+            // available document width. Its serialized table width is not a
+            // fixed rendered width (120,220 -> 180,330 in a 510pt body).
+            let tableWidth = width
+            guard tableWidth > 0, tableWidth.isFinite else {
+                throw ConversionFailure("UDF tablosu sayfa genişliğine sığmıyor.")
+            }
+            let widths: [CGFloat]
             if !source.columnWidths.isEmpty {
                 guard source.columnWidths.count == columns else {
                     throw ConversionFailure("UDF tablo sütun ölçülerinin sayısı uyuşmuyor.")
                 }
-                explicitWidths = source.columnWidths.map { CGFloat($0) }
-            } else if let first = source.rows.first,
-                      first.cells.count == columns,
-                      first.cells.allSatisfy({ $0.columnSpan == 1 && $0.width != nil }),
-                      positions.first == Array(0..<columns) {
-                explicitWidths = first.cells.compactMap { $0.width.map { CGFloat($0) } }
-            } else {
-                explicitWidths = nil
-            }
-            let inferredWidth = explicitWidths?.reduce(0, +) ?? width
-            let tableWidth = source.width.map { CGFloat($0) } ?? inferredWidth
-            guard tableWidth > 0, tableWidth <= width + 1 else {
-                throw ConversionFailure("UDF tablosu sayfa genişliğine sığmıyor.")
-            }
-            let widths: [CGFloat]
-            if let supplied = explicitWidths {
-                guard supplied.allSatisfy({ $0.isFinite && $0 > 0 }),
-                      abs(supplied.reduce(0, +) - tableWidth) <= 1 else {
-                    throw ConversionFailure("UDF tablo ve sütun genişlikleri birbiriyle uyuşmuyor.")
+                let weights = source.columnWidths.map { CGFloat($0) }
+                let total = weights.reduce(0, +)
+                guard weights.allSatisfy({ $0.isFinite && $0 > 0 }), total.isFinite, total > 0 else {
+                    throw ConversionFailure("UDF tablo sütun oranları geçersiz.")
                 }
-                widths = supplied
+                widths = weights.map { tableWidth * $0 / total }
             } else {
                 widths = Array(repeating: tableWidth / CGFloat(columns), count: columns)
             }
@@ -495,10 +592,9 @@ enum UDFRenderer {
             table.collapsesBorders = true
             table.hidesEmptyCells = false
             table.setContentWidth(tableWidth, type: .absoluteValueType)
-            if case .outer = source.border {
-                table.setWidth(0.5, type: .absoluteValueType, for: .border)
-                table.setBorderColor(.black)
-            }
+            table.setWidth(0, type: .absoluteValueType, for: .padding)
+            table.setWidth(0, type: .absoluteValueType, for: .border)
+            table.setWidth(0, type: .absoluteValueType, for: .margin)
             for (rowIndex, row) in source.rows.enumerated() {
                 for (index, cell) in row.cells.enumerated() {
                     let column = positions[rowIndex][index]
@@ -509,21 +605,18 @@ enum UDFRenderer {
                     guard cellWidth > 4, cellWidth <= tableWidth + 1 else {
                         throw ConversionFailure("UDF tablo hücresinin genişliği geçersiz.")
                     }
-                    if let declared = cell.width, abs(CGFloat(declared) - cellWidth) > 1 {
-                        throw ConversionFailure("UDF hücre ve sütun genişlikleri birbiriyle uyuşmuyor.")
+                    if cell.width != nil {
+                        throw ConversionFailure("Ayrı sabit hücre genişliği bu UDF tablo düzeninde henüz doğrulanmadı.")
                     }
-                    let borderWidth: CGFloat
-                    if case .grid = source.border { borderWidth = 1 } else { borderWidth = 0 }
-                    let contentWidth = max(1, cellWidth - 4 - borderWidth)
+                    let contentWidth = cellWidth
                     tableBlock.setContentWidth(contentWidth, type: .absoluteValueType)
-                    tableBlock.setWidth(2, type: .absoluteValueType, for: .padding)
+                    tableBlock.setWidth(0, type: .absoluteValueType, for: .padding)
+                    tableBlock.setWidth(0, type: .absoluteValueType, for: .border)
+                    tableBlock.setWidth(0, type: .absoluteValueType, for: .margin)
                     tableBlock.verticalAlignment = .topAlignment
-                    if case .grid = source.border {
-                        tableBlock.setWidth(0.5, type: .absoluteValueType, for: .border)
-                        tableBlock.setBorderColor(.black)
-                    }
                     if let color = cell.backgroundRGB { tableBlock.backgroundColor = rgb(color) }
                     let nested = parents + [tableBlock]
+                    let start = result.length
                     if cell.blocks.isEmpty {
                         let style = NSMutableParagraphStyle()
                         style.textBlocks = nested
@@ -533,14 +626,29 @@ enum UDFRenderer {
                             try append(block, to: result, parents: nested, width: contentWidth, depth: depth + 1)
                         }
                     }
+                    var edges = 0
+                    switch source.border {
+                    case .none: break
+                    case .grid: edges = 15
+                    case .outer:
+                        if rowIndex == 0 { edges |= 1 }
+                        if column + cell.columnSpan == columns { edges |= 2 }
+                        if rowIndex + cell.rowSpan == source.rows.count { edges |= 4 }
+                        if column == 0 { edges |= 8 }
+                    }
+                    if edges != 0 {
+                        let characters = NSRange(location: start, length: result.length - start)
+                        let overlay = CellBorder(block: tableBlock, edges: edges, characterRange: characters)
+                        var ranges: [(NSRange, [CellBorder])] = []
+                        result.enumerateAttribute(UDFRenderer.cellBorderAttribute, in: characters) { value, range, _ in
+                            ranges.append((range, (value as? [CellBorder] ?? []) + [overlay]))
+                        }
+                        for (range, overlays) in ranges {
+                            result.addAttribute(UDFRenderer.cellBorderAttribute, value: overlays, range: range)
+                        }
+                    }
                 }
             }
-            // Close the table's text-block context before a following body block.
-            let separator = NSMutableParagraphStyle()
-            separator.textBlocks = parents
-            separator.minimumLineHeight = 1
-            separator.maximumLineHeight = 1
-            result.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 1), .paragraphStyle: separator]))
         }
 
         private func imageText(_ source: UDFImage, width available: CGFloat) throws -> NSAttributedString {
@@ -591,7 +699,15 @@ enum UDFRenderer {
                                                        weight: style.bold ? 9 : 5, size: CGFloat(style.size)) else {
                 throw ConversionFailure("UDF yazı tipi bu Mac'te bulunamadı: \(family). Düzen değiştirilmeden dönüştürülemedi.")
             }
-            var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+            // Swing/AWT does not request optional kerning or ligatures by
+            // default. CoreText otherwise enables font kerning implicitly;
+            // this changes legal-document line wraps (TA/PA pairs, fi, etc.).
+            // Zero optional ligatures still preserves shaping required by the
+            // writing system, such as Arabic ligatures.
+            var attributes: [NSAttributedString.Key: Any] = [
+                .font: font, .foregroundColor: NSColor.black,
+                .kern: 0, .ligature: 0
+            ]
             if let color = style.foregroundRGB { attributes[.foregroundColor] = rgb(color) }
             if let color = style.backgroundRGB { attributes[.backgroundColor] = rgb(color) }
             if style.underline { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
@@ -600,7 +716,8 @@ enum UDFRenderer {
             return attributes
         }
 
-        private func paragraphAttributes(_ source: UDFParagraphStyle, parents: [NSTextBlock]) -> NSMutableParagraphStyle {
+        private func paragraphAttributes(_ source: UDFParagraphStyle, parents: [NSTextBlock],
+                                         ordinaryLineHeight: CGFloat?) -> NSMutableParagraphStyle {
             let style = NSMutableParagraphStyle()
             switch source.alignment {
             case .left: style.alignment = .left
@@ -615,7 +732,15 @@ enum UDFRenderer {
             style.paragraphSpacing = CGFloat(source.spaceAfter)
             // Swing's lineSpacing is a multiplier of the ordinary line height,
             // with 0 meaning single spacing, 0.5 meaning one-and-a-half spacing.
-            style.lineHeightMultiple = CGFloat(1 + source.lineSpacing)
+            if let height = ordinaryLineHeight {
+                style.minimumLineHeight = height
+                style.maximumLineHeight = height
+                style.lineHeightMultiple = 1
+            } else {
+                // Attachments, supplementary fallback glyphs and superscripts
+                // must retain their own (possibly taller) line fragments.
+                style.lineHeightMultiple = CGFloat(1 + source.lineSpacing)
+            }
             style.lineBreakMode = .byWordWrapping
             style.tabStops = source.tabStops.map { NSTextTab(textAlignment: .left, location: CGFloat($0), options: [:]) }
             style.defaultTabInterval = 72

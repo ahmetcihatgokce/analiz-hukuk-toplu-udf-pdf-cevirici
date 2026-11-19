@@ -121,6 +121,29 @@ enum NativeUDFSelfTest {
                 try require(traits.contains(.boldFontMask), "Bold span lost its bold face")
             }
 
+            check("a fitting single line can retain mixed 12 and 18 point spans") {
+                var fixture = Fixture()
+                let small = "SMALL_SENTINEL "
+                let large = "LARGE_SENTINEL\n"
+                fixture.text = small + large
+                let body = "<paragraph><content startOffset=\"0\" length=\"\(small.utf16.count)\" size=\"12\"/><content startOffset=\"\(small.utf16.count)\" length=\"\(large.utf16.count)\" size=\"18\"/></paragraph>"
+                let output = root.appendingPathComponent("mixed-size-single-line.pdf")
+                try UDFRenderer.render(UDFDocument.parse(xml: fixture.xml(body: body)), to: output)
+                let pdf = try openPDF(output)
+                try require(pdf.pageCount == 1, "Fitting mixed-size paragraph unexpectedly paginated")
+                try requireText(pdf, contains: ["SMALL_SENTINEL", "LARGE_SENTINEL"])
+            }
+
+            check("fail closed: mixed font heights that require wrapping are not exported partially") {
+                var fixture = Fixture()
+                let small = String(repeating: "small words ", count: 60)
+                let large = "LARGE_SENTINEL\n"
+                fixture.text = small + large
+                let body = "<paragraph><content startOffset=\"0\" length=\"\(small.utf16.count)\" size=\"12\"/><content startOffset=\"\(small.utf16.count)\" length=\"\(large.utf16.count)\" size=\"18\"/></paragraph>"
+                let parsed = try UDFDocument.parse(xml: fixture.xml(body: body))
+                try mustReject { try UDFRenderer.render(parsed, to: root.appendingPathComponent("unsupported-mixed-wrap.pdf")) }
+            }
+
             check("table cells remain present and occupy separate columns") {
                 var fixture = Fixture()
                 let before = fixture.paragraph("TABLE_START\n")
@@ -129,7 +152,7 @@ enum NativeUDFSelfTest {
                 let a2 = fixture.paragraph("CELL_A2\n")
                 let b2 = fixture.paragraph("CELL_B2\n")
                 let after = fixture.paragraph("TABLE_END\n")
-                let body = before + "<table border=\"borderAll\" columnWidths=\"120,220\"><row><cell columnSpan=\"1\" rowSpan=\"1\">\(a1)</cell><cell columnSpan=\"1\" rowSpan=\"1\">\(b1)</cell></row><row><cell columnSpan=\"1\" rowSpan=\"1\">\(a2)</cell><cell columnSpan=\"1\" rowSpan=\"1\">\(b2)</cell></row></table>" + after
+                let body = before + "<table tableName=\"Sabit\" columnCount=\"2\" columnSpans=\"120,220\" width=\"340\" border=\"borderCell\"><row rowName=\"row1\" rowType=\"dataRow\" border=\"borderCell\"><cell border=\"borderCell\" borderSpec=\"15\">\(a1)</cell><cell border=\"borderCell\" borderSpec=\"15\">\(b1)</cell></row><row rowName=\"row2\" rowType=\"dataRow\" border=\"borderCell\"><cell border=\"borderCell\" borderSpec=\"15\">\(a2)</cell><cell border=\"borderCell\" borderSpec=\"15\">\(b2)</cell></row></table>" + after
                 let output = root.appendingPathComponent("table.pdf")
                 try UDFRenderer.render(UDFDocument.parse(xml: fixture.xml(body: body)), to: output)
                 let pdf = try openPDF(output)
@@ -144,6 +167,10 @@ enum NativeUDFSelfTest {
                 let rightBounds = right.bounds(for: page)
                 try require(rightBounds.minX > leftBounds.minX + 40, "Table was flattened into a single column")
                 try require(abs(leftBounds.midY - rightBounds.midY) < 10, "First table row no longer shares a baseline")
+                guard let lowerLeft = pdf.findString("CELL_A2", withOptions: []).first else {
+                    throw Failure(message: "Second table row cannot be selected")
+                }
+                try requireTableGrid(page: page, upperLeft: left, upperRight: right, lowerLeft: lowerLeft)
             }
 
             check("embedded image produces visible PDF pixels") {
@@ -170,10 +197,11 @@ enum NativeUDFSelfTest {
             check("explicit page break and header/footer repeat on each page") {
                 var fixture = Fixture()
                 let first = fixture.paragraph("FIRST_PAGE_SENTINEL\n")
+                let breakParagraph = fixture.paragraph("\n")
                 let second = fixture.paragraph("SECOND_PAGE_SENTINEL\n")
                 let header = fixture.paragraph("HEADER_SENTINEL\n")
                 let footer = fixture.paragraph("FOOTER_SENTINEL\n")
-                let xml = fixture.xml(body: first + "<pageBreak/>" + second, header: header, footer: footer)
+                let xml = fixture.xml(body: first + "<page-break>" + breakParagraph + "</page-break>" + second, header: header, footer: footer)
                 let output = root.appendingPathComponent("headers-pagebreak.pdf")
                 try UDFRenderer.render(UDFDocument.parse(xml: xml), to: output)
                 let pdf = try openPDF(output)
@@ -455,6 +483,69 @@ enum NativeUDFSelfTest {
             }
         }
         return count
+    }
+
+    private static func requireTableGrid(page: PDFPage, upperLeft: PDFSelection,
+                                         upperRight: PDFSelection, lowerLeft: PDFSelection) throws {
+        let media = page.bounds(for: .mediaBox)
+        let image = page.thumbnail(of: NSSize(width: media.width * 2, height: media.height * 2), for: .mediaBox)
+        guard let encoded = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: encoded) else {
+            throw Failure(message: "Table grid cannot be rasterized")
+        }
+        let first = upperLeft.bounds(for: page)
+        let right = upperRight.bounds(for: page)
+        let second = lowerLeft.bounds(for: page)
+
+        @MainActor
+        func dark(near point: CGPoint) -> Bool {
+            let scaleX = CGFloat(bitmap.pixelsWide) / media.width
+            let scaleY = CGFloat(bitmap.pixelsHigh) / media.height
+            let centerX = Int((point.x - media.minX) * scaleX)
+            let centerY = Int((media.maxY - point.y) * scaleY)
+            let padX = Int(ceil(0.8 * scaleX))
+            let padY = Int(ceil(0.8 * scaleY))
+            let left = max(0, centerX - padX), right = min(bitmap.pixelsWide - 1, centerX + padX)
+            let top = max(0, centerY - padY), bottom = min(bitmap.pixelsHigh - 1, centerY + padY)
+            guard left <= right, top <= bottom else { return false }
+            for y in top...bottom {
+                for x in left...right {
+                    if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                       color.alphaComponent > 0.1,
+                       color.redComponent + color.greenComponent + color.blueComponent < 2.25 {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
+        // The second column starts at the vertical grid separator. Sample its
+        // continuous stroke between row text centers, where letter shapes alone
+        // cannot provide a full line. Also sample the row separator far to the
+        // right of the first cell's text and left of the second column.
+        let lowerY = min(first.midY, second.midY) + 2
+        let upperY = max(first.midY, second.midY) - 2
+        var verticalTotal = 0, verticalDark = 0
+        if upperY > lowerY {
+            for y in stride(from: lowerY, through: upperY, by: 0.5) {
+                verticalTotal += 1
+                if dark(near: CGPoint(x: right.minX, y: y)) { verticalDark += 1 }
+            }
+        }
+        let leftX = first.maxX + 15
+        let rightX = right.minX - 15
+        let rowBoundary = (first.midY + second.midY) / 2
+        var horizontalTotal = 0, horizontalDark = 0
+        if rightX > leftX {
+            for x in stride(from: leftX, through: rightX, by: 0.5) {
+                horizontalTotal += 1
+                if dark(near: CGPoint(x: x, y: rowBoundary)) { horizontalDark += 1 }
+            }
+        }
+        try require(verticalTotal >= 15 && Double(verticalDark) / Double(verticalTotal) > 0.8,
+                    "Table vertical grid separator is missing from the rendered PDF")
+        try require(horizontalTotal >= 30 && Double(horizontalDark) / Double(horizontalTotal) > 0.8,
+                    "Table horizontal grid separator is missing from the rendered PDF")
     }
 }
 #endif

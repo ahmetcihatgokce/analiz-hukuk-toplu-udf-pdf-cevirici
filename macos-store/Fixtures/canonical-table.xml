@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?> 
+
+<template format_id="1.8" >
+<content><![CDATA[TABLE_START
+CELL_A1
+CELL_B1
+CELL_A2
+CELL_B2
+TABLE_END
+
+]]></content><properties><pageFormat mediaSizeName="1" leftMargin="42.5" rightMargin="42.5" topMargin="42.5" bottomMargin="42.5" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties><styles><style name="default" description="Geçerli" /><style name="hvl-default" family="Times New Roman" size="12" description="Gövde" /></styles>
+<elements resolver="hvl-default" >
+<paragraph><content startOffset="0" length="12" /></paragraph><table tableName="Sabit" columnCount="2" columnSpans="120,220" width="340.0" border="borderCell"><row rowName="row1" rowType="dataRow" border="borderCell"><cell border="borderCell" borderSpec="15"><paragraph><content startOffset="12" length="8" /></paragraph></cell><cell border="borderCell" borderSpec="15"><paragraph><content startOffset="20" length="8" /></paragraph></cell></row><row rowName="row2" rowType="dataRow" border="borderCell"><cell border="borderCell" borderSpec="15"><paragraph><content startOffset="28" length="8" /></paragraph></cell><cell border="borderCell" borderSpec="15"><paragraph><content startOffset="36" length="8" /></paragraph></cell></row></table><paragraph><content startOffset="44" length="10" /></paragraph>
+</elements>
+
+</template>

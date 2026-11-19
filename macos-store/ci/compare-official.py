@@ -193,10 +193,11 @@ catch {
 '''
 
 
-def invoke(command: list[str], *, timeout: int, cwd: Path | None = None) -> subprocess.CompletedProcess:
+def invoke(command: list[str], *, timeout: int, cwd: Path | None = None,
+           env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     # Commands contain public fixture paths and official runtime paths only.
     return subprocess.run(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False)
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False, env=env)
 
 
 def write_log(path: Path, result: subprocess.CompletedProcess) -> None:
@@ -363,9 +364,12 @@ def main() -> int:
                                                     "logTail": oracle.stdout[-2500:]},
                                                    ensure_ascii=False, separators=(",", ":")), flush=True)
                 continue
-            native = invoke([str(args.native), "--batch", str(native_input), str(native_output)], timeout=120)
+            native_environment = dict(os.environ)
+            native_environment["UDF_LAYOUT_DIAGNOSTICS"] = "1"
+            native = invoke([str(args.native), "--batch", str(native_input), str(native_output)], timeout=120,
+                            env=native_environment)
             write_log(case / "native.log", native)
-            layout_lines = [line[:1500] for line in native.stdout.splitlines() if "UDF_LAYOUTDIAG" in line][:8]
+            layout_lines = [line[:1500] for line in native.stdout.splitlines() if line.startswith("UDF_")][:8]
             if layout_lines:
                 print("NATIVE_LAYOUT " + json.dumps({"file": name, "lines": layout_lines},
                                                     ensure_ascii=False, separators=(",", ":")), flush=True)

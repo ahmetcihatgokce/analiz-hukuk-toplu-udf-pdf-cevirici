@@ -60,8 +60,11 @@ struct UDFRow { let cells: [UDFCell] }
 
 struct UDFTable {
     let rows: [UDFRow]
+    /// Canonical columnSpans values are proportional weights, not fixed points.
     let columnWidths: [Double]
     let border: UDFTableBorder
+    /// Serialized width is validated metadata; the official PDF exporter lays
+    /// the canonical table out across the full available body width.
     let width: Double?
 }
 
@@ -260,7 +263,7 @@ private final class UDFModelBuilder {
     private var covered: [NSRange] = []
     private let characterKeys: Set<String> = ["family", "size", "fontsize", "bold", "italic", "underline", "strikethrough", "foreground", "background", "superscript", "subscript"]
     private let paragraphKeys: Set<String> = ["alignment", "leftindent", "rightindent", "firstlineindent", "spaceabove", "spacebelow", "linespacing", "tabset", "keeptogether", "keepwithnext", "pagebreakbefore"]
-    private let referenceKeys: Set<String> = ["resolver"]
+    private let referenceKeys: Set<String> = ["resolver", "name", "description"]
     private let rangeKeys: Set<String> = ["startoffset", "length"]
 
     init(root: UDFXMLNode, resources: [String: Data]) {
@@ -289,13 +292,18 @@ private final class UDFModelBuilder {
             try validate(collection, allowed: [])
             for style in collection.children {
                 guard style.name == "style", style.children.isEmpty else { throw UDFParseError("UDF stil yapısı desteklenmiyor.") }
-                try validate(style, allowed: characterKeys.union(paragraphKeys).union(["name", "description", "resolver"]))
+                try validate(style, allowed: characterKeys.union(paragraphKeys).union(["name", "description", "resolver", "font_attribute_key"]))
+                if let cache = style.attributes["font_attribute_key"] { try validateFontCache(cache) }
                 guard let name = style.attributes["name"], !name.isEmpty, styles[name] == nil else { throw UDFParseError("UDF stil adı eksik veya yineleniyor.") }
                 styles[name] = style
             }
         }
         try validate(elements, allowed: referenceKeys)
-        let defaults = styles["default"]?.attributes ?? styles["hvl-default"]?.attributes ?? [:]
+        // A named document style is an independent Swing style. The UI's
+        // default Dialog/gray attributes must not leak into hvl-default unless
+        // that style explicitly names default as its resolver.
+        let defaults = elements.attributes["resolver"] == nil
+            ? (styles["default"]?.attributes ?? styles["hvl-default"]?.attributes ?? [:]) : [:]
         let inherited = try resolved(elements, inherited: defaults)
         var body: [UDFBlock] = [], header: [UDFBlock] = [], footer: [UDFBlock] = []
         for child in elements.children {
@@ -347,7 +355,26 @@ private final class UDFModelBuilder {
             return .image(try image(node))
         case "page-break", "pagebreak":
             try validate(node, allowed: [])
-            guard node.children.isEmpty else { throw UDFParseError("Sayfa sonu öğesi içerik barındıramaz.") }
+            guard !node.children.isEmpty, node.children.count <= 128 else {
+                throw UDFParseError("UDF sayfa sonu yapısal paragraf işaretçisi içermelidir.")
+            }
+            for paragraph in node.children {
+                guard paragraph.name == "paragraph" else { throw UDFParseError("UDF sayfa sonu içinde beklenmeyen öğe var.") }
+                try validate(paragraph, allowed: characterKeys.union(paragraphKeys).union(referenceKeys))
+                guard paragraph.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw UDFParseError("UDF sayfa sonu içinde belge metni bulunuyor.")
+                }
+                for marker in paragraph.children {
+                    guard marker.name == "content", marker.children.isEmpty else {
+                        throw UDFParseError("UDF sayfa sonu yalnızca boş satır işaretçisi içerebilir.")
+                    }
+                    try validate(marker, allowed: characterKeys.union(referenceKeys).union(rangeKeys))
+                    let value = try slice(marker, fallback: marker.text)
+                    guard value.allSatisfy({ $0 == "\n" || $0 == "\r" || $0 == "\r\n" }) else {
+                        throw UDFParseError("UDF sayfa sonu işaretçisi gerçek belge metnini kapsıyor; metin kaybına yol açacak PDF üretilmedi.")
+                    }
+                }
+            }
             return .pageBreak
         default: throw UDFParseError("Bu UDF öğesi yerleşimi korunarak henüz dönüştürülemiyor: \(node.name)")
         }
@@ -446,11 +473,7 @@ private final class UDFModelBuilder {
         }
         try validateTableGrid(rows, expectedColumns: declaredColumns ?? (widths.isEmpty ? nil : widths.count))
         let explicitWidth = try optionalNumber(node.attributes["width"], min: 1, max: 5000, name: "table width")
-        let measuredWidth = widths.isEmpty ? nil : widths.reduce(0, +)
-        if let explicit = explicitWidth, let measured = measuredWidth, abs(explicit - measured) > 1 {
-            throw UDFParseError("UDF tablo genişliği ile sütun ölçülerinin toplamı uyuşmuyor.")
-        }
-        return UDFTable(rows: rows, columnWidths: widths, border: border, width: explicitWidth ?? measuredWidth)
+        return UDFTable(rows: rows, columnWidths: widths, border: border, width: explicitWidth)
     }
 
     private func tableBorder(_ raw: String) throws -> UDFTableBorder {
@@ -466,6 +489,16 @@ private final class UDFModelBuilder {
         guard let raw = raw else { return }
         guard raw.utf16.count <= 128, !raw.unicodeScalars.contains(where: { $0.value < 32 }) else {
             throw UDFParseError("UDF tanımlayıcı adı geçersiz: \(name)")
+        }
+    }
+
+    private func validateFontCache(_ value: String) throws {
+        // Proven redundant by the official serializer/reader on synthetic data:
+        // the reader reports this UI cache key as unhandled. It is never used
+        // as an executable class or a substitute for declared family/size.
+        guard value.utf8.count <= 512, value.hasPrefix("javax.swing.plaf.FontUIResource["), value.hasSuffix("]"),
+              !value.unicodeScalars.contains(where: { $0.value < 32 }) else {
+            throw UDFParseError("UDF yazı tipi önbellek kaydı desteklenmiyor.")
         }
     }
 
@@ -605,7 +638,11 @@ private final class UDFModelBuilder {
             result.merge(style.attributes) { _, new in new }
             if let fontSize = style.attributes["fontsize"] { result["size"] = fontSize }
         }
-        if let reference = node.attributes["resolver"] { try apply(reference) }
+        let named = ["paragraph", "content"].contains(node.name) ? node.attributes["name"] : nil
+        if let reference = node.attributes["resolver"], let named = named, reference != named {
+            throw UDFParseError("UDF öğesinde çelişen adlandırılmış stil başvuruları var.")
+        }
+        if let reference = node.attributes["resolver"] ?? named { try apply(reference) }
         result.merge(node.attributes) { _, new in new }
         if let fontSize = node.attributes["fontsize"] { result["size"] = fontSize }
         return result
@@ -614,6 +651,10 @@ private final class UDFModelBuilder {
     private func validate(_ node: UDFXMLNode, allowed: Set<String>) throws {
         let unknown = Set(node.attributes.keys).subtracting(allowed)
         guard unknown.isEmpty else { throw UDFParseError("UDF biçiminde henüz desteklenmeyen özellik: \(node.name).\(unknown.sorted().joined(separator: ","))") }
+        try metadataName(node.attributes["name"], name: "name")
+        if let description = node.attributes["description"], description.utf16.count > 512 {
+            throw UDFParseError("UDF stil açıklaması boyut sınırını aşıyor.")
+        }
         if node.name != "content", node.name != "paragraph" {
             guard node.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw UDFParseError("UDF öğesinde beklenmeyen doğrudan metin: \(node.name)") }
         }

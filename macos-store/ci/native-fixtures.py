@@ -131,7 +131,6 @@ def generate(directory: Path) -> dict:
         row = ET.SubElement(table, "row", {"rowName": f"row{row_index}", "rowType": "dataRow", "border": "borderCell"})
         for value in row_values:
             cell = ET.SubElement(row, "cell", {
-                "colspan": "1", "align": "top", "fillColor": "16777215",
                 "border": "borderCell", "borderSpec": "15",
             })
             table_document.paragraph(value, parent=cell)
@@ -156,7 +155,8 @@ def generate(directory: Path) -> dict:
     header = ET.SubElement(paginated.elements, "header")
     paginated.paragraph("HEADER_SENTINEL\n", parent=header)
     paginated.paragraph("FIRST_PAGE_SENTINEL\n")
-    ET.SubElement(paginated.elements, "page-break")
+    page_break = ET.SubElement(paginated.elements, "page-break")
+    paginated.paragraph("\n", parent=page_break)
     paginated.paragraph("SECOND_PAGE_SENTINEL\n")
     footer = ET.SubElement(paginated.elements, "footer")
     paginated.paragraph("FOOTER_SENTINEL\n", parent=footer)

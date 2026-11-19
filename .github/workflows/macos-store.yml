@@ -77,7 +77,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 macos-store/ci/native-fixtures.py "$STORE_TEST_ROOT/compatibility-fixtures"
+          python3 macos-store/ci/prepare-canonical-comparison.py \
+            --canonical "$GITHUB_WORKSPACE/macos-store/Fixtures" \
+            --manifest "$GITHUB_WORKSPACE/macos-store/Fixtures/canonical-expectations.json" \
+            --output "$STORE_TEST_ROOT/compatibility-fixtures"
           python3 macos-store/ci/compare-official.py \
             --fixtures "$STORE_TEST_ROOT/compatibility-fixtures" \
             --native "$RUNNER_TEMP/store-tests/Toplu UDF PDF Cevirici.app/Contents/MacOS/UdfPdf" \

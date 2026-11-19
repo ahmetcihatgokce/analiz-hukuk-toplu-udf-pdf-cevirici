@@ -1,7 +1,9 @@
 import AppKit
 import CoreFoundation
+import CoreGraphics
 import Foundation
 import ImageIO
+import PDFKit
 #if canImport(FoundationXML)
 import FoundationXML
 #endif
@@ -71,29 +73,66 @@ enum OfflineHTMLRenderer {
         let maximumHeight: CGFloat = 781.89 * 1000
         let storage = NSTextStorage(attributedString: attributed)
         let layout = NSLayoutManager()
+        layout.usesFontLeading = true
+        layout.allowsNonContiguousLayout = false
         let container = NSTextContainer(size: NSSize(width: width, height: maximumHeight))
         container.lineFragmentPadding = 0
+        container.widthTracksTextView = false
+        container.heightTracksTextView = false
         layout.addTextContainer(container)
         storage.addLayoutManager(layout)
-        let view = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: maximumHeight), textContainer: container)
-        view.textContainerInset = .zero
-        view.isEditable = false
-        view.drawsBackground = true
-        view.backgroundColor = .white
         layout.ensureLayout(for: container)
         let range = layout.glyphRange(for: container)
         let bounds = layout.usedRect(for: container)
+        let ink = layout.boundingRect(forGlyphRange: range, in: container)
         guard range.location == 0, range.length == layout.numberOfGlyphs,
-              bounds.maxX <= width + 1, bounds.minX >= -1,
-              bounds.maxY.isFinite, bounds.maxY <= maximumHeight else {
+              bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+              bounds.width.isFinite, bounds.height.isFinite,
+              bounds.maxX <= width + 3, bounds.minX >= -3,
+              bounds.maxY <= maximumHeight,
+              ink.origin.x.isFinite, ink.origin.y.isFinite,
+              ink.width.isFinite, ink.height.isFinite,
+              ink.minX >= -3, ink.maxX <= width + 3,
+              ink.minY >= -3, ink.maxY <= maximumHeight else {
             throw ConversionFailure("HTML sayfa düzeni güvenli çıktı alanına sığmıyor; içerik kesilmeden dönüştürülemedi.")
         }
-        let height = max(24, ceil(bounds.maxY + 2))
-        view.setFrameSize(NSSize(width: width, height: height))
-        let pdf = view.dataWithPDF(inside: NSRect(x: 0, y: 0, width: width, height: height))
+        let height = max(24, ceil(max(bounds.maxY, ink.maxY)))
+        // Draw the laid-out glyphs directly, using the same flipped AppKit
+        // graphics context as the native UDF renderer. A text-view capture can
+        // clip content when the view's frame and its container heights differ.
+        let padding: CGFloat = 3
+        var mediaBox = CGRect(x: 0, y: 0, width: width + 2 * padding, height: height + 2 * padding)
+        let buffer = NSMutableData()
+        guard let consumer = CGDataConsumer(data: buffer),
+              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            throw ConversionFailure("HTML metin alanının PDF boyutu oluşturulamadı.")
+        }
+        context.beginPDFPage(nil)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(mediaBox)
+        context.saveGState()
+        context.translateBy(x: padding, y: height + padding)
+        context.scaleBy(x: 1, y: -1)
+        context.textMatrix = .identity
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        layout.drawBackground(forGlyphRange: range, at: .zero)
+        layout.drawGlyphs(forGlyphRange: range, at: .zero)
+        NSGraphicsContext.restoreGraphicsState()
+        context.restoreGState()
+        context.endPDFPage()
+        context.closePDF()
+        let pdf = buffer as Data
         guard pdf.starts(with: Data("%PDF-".utf8)), pdf.count <= 256 * 1024 * 1024 else {
             throw ConversionFailure("Yerel HTML PDF çıktısı oluşturulamadı veya boyut sınırını aşıyor.")
         }
+#if STORE_TESTING
+        let extracted = PDFDocument(data: pdf)?.string ?? ""
+        let fixtureTitle = "Vekâlet pulu makbuzu"
+        let importedTitle = attributed.string.contains(fixtureTitle)
+        let pdfTitle = extracted.contains(fixtureTitle)
+        print("HTML_LAYOUT_DIAG importedCharacters=\(attributed.length) importedFixtureTitle=\(importedTitle) pdfCharacters=\(extracted.utf16.count) pdfFixtureTitle=\(pdfTitle) canvasHeight=\(mediaBox.height) usedHeight=\(bounds.maxY)")
+#endif
         return pdf
     }
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" ?> 
+
+<template format_id="1.8" >
+<content><![CDATA[IMAGE_SENTINEL
+￼
+
+]]></content><properties><pageFormat mediaSizeName="1" leftMargin="42.5" rightMargin="42.5" topMargin="42.5" bottomMargin="42.5" paperOrientation="1" headerFOffset="20.0" footerFOffset="20.0" /></properties><styles><style name="default" description="Geçerli" /><style name="hvl-default" family="Times New Roman" size="12" description="Gövde" /></styles>
+<elements resolver="hvl-default" >
+<paragraph><content startOffset="0" length="15" /></paragraph><paragraph><image width="96.0" height="48.0" imageData="iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAAV0lEQVR42u3QQQkAAAgEsAvh2/7J
+zGED/8JgCZap5hAFggQJEiRIkCBBCBIkSJAgQYIEIUiQIEGCBAkShCBBggQJEiRIkCAECRIkSJAg
+QYIQJEiQIEE/LAn6sR5vmE8GAAAAAElFTkSuQmCC" startOffset="15" length="1" /><content startOffset="16" length="1" /></paragraph>
+</elements>
+
+</template>

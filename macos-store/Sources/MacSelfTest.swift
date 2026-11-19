@@ -85,6 +85,13 @@ enum MacSelfTest {
                 let results = await engine.convert(inputs: [url], outputDirectory: root.appendingPathComponent("html"), archivesCopyPDFOnly: false) { _, _, _ in }
                 try require(results.count == 1 && results[0].error == nil, results.first?.error ?? "HTML output missing")
                 let text = results.first?.output.flatMap { PDFDocument(url: $0)?.string } ?? ""
+                if !text.contains("Vekâlet pulu makbuzu"),
+                   let generated = results.first?.output,
+                   let syntheticPDF = try? Data(contentsOf: generated), syntheticPDF.count < 256 * 1024 {
+                    // This is the test-created receipt above, never a user document.
+                    print("SYNTHETIC_HTML_PDF_BASE64 " + syntheticPDF.base64EncodedString())
+                    print("SYNTHETIC_HTML_EXTRACTED_TEXT " + text.debugDescription)
+                }
                 for expected in ["Vekâlet pulu makbuzu", "Şığüöç", "125,00 TL"] {
                     try require(text.contains(expected), "HTML text missing: \(expected)")
                 }
