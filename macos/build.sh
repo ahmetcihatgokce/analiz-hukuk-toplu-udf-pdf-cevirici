@@ -31,7 +31,7 @@ for size in 16 32 128 256 512; do
     sips -z "$double" "$double" "$root/Resources/AppIcon.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - "$app"
+codesign --force --deep --options runtime --sign - "$app"
 codesign --verify --deep --strict "$app"
 ditto -c -k --sequesterRsrc --keepParent "$app" "$output/Toplu-UDF-PDF-Mac-1.04-$(uname -m).zip"
 printf '%s\n' "$app"
